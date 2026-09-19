@@ -1,7 +1,3 @@
-from __future__ import annotations
+from research_engine.types import LLMClient, ToolCall, TurnResult
 
-from typing import Protocol
-
-
-class LLMClient(Protocol):
-    async def complete(self, prompt: str) -> str: ...
+__all__ = ["LLMClient", "ToolCall", "TurnResult"]

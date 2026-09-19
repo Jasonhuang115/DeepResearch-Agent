@@ -1,6 +1,3 @@
-from __future__ import annotations
+from research_engine.llm.scripted import ScriptedLLM
 
-
-class MockLLM:
-    async def complete(self, prompt: str) -> str:
-        return f"(mock) considered: {prompt[:80]}"
+__all__ = ["ScriptedLLM"]

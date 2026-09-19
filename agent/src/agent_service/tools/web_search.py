@@ -3,6 +3,19 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+DESCRIPTION = "Search the web for sources and evidence related to the research question."
+
+PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": "Search query",
+        },
+    },
+    "required": ["query"],
+}
+
 
 async def web_search(args: dict[str, Any]) -> str:
     q = str(args.get("query") or "")

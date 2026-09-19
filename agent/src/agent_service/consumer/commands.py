@@ -7,8 +7,8 @@ import logging
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from agent_service.config import settings
-from agent_service.loop.react import run_research
 from agent_service.producer.events import EventSeq
+from agent_service.runtime.agent_runner import run_research
 
 log = logging.getLogger("agent.consumer")
 

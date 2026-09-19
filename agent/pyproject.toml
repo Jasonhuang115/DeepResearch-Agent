@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
   "aiokafka>=0.12",
   "fastapi>=0.115",
+  "openai>=1.60",
   "uvicorn[standard]>=0.32",
 ]
 
@@ -17,7 +18,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_service"]
+packages = ["src/agent_service", "src/research_engine"]
 
 [tool.uv]
 package = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]
+testpaths = ["tests"]
