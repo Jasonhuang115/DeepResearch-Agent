@@ -1,0 +1,27 @@
+.DS_Store
+.env
+.env.local
+*.log
+
+# Go
+backend/bin/
+backend/vendor/
+backend/coverage.out
+backend/server
+
+# Python
+agent/.venv/
+agent/__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local data
+var/
+*.db
