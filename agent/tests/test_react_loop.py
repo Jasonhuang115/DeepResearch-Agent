@@ -143,7 +143,7 @@ async def test_max_turns_forces_tool_choice_none() -> None:
         def __init__(self) -> None:
             self.calls: list[dict] = []
 
-        async def complete(self, messages, tools, *, tool_choice="auto", cancel=None, on_delta=None):
+        async def complete(self, messages, tools, *, tool_choice="auto", cancel=None, on_delta=None, **_kwargs):
             self.calls.append({"tool_choice": tool_choice, "messages": messages})
             if tool_choice == "none":
                 return TurnResult(content="# Report\nForced stop.")
@@ -175,7 +175,7 @@ async def test_max_turns_empty_final_fails() -> None:
         def __init__(self) -> None:
             self.calls: list[dict] = []
 
-        async def complete(self, messages, tools, *, tool_choice="auto", cancel=None, on_delta=None):
+        async def complete(self, messages, tools, *, tool_choice="auto", cancel=None, on_delta=None, **_kwargs):
             self.calls.append({"tool_choice": tool_choice})
             if tool_choice == "none":
                 return TurnResult()

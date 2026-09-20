@@ -16,6 +16,7 @@ import (
 	"deepresearch/internal/service"
 	"deepresearch/internal/sse"
 	"deepresearch/internal/tenant"
+	"deepresearch/internal/upload"
 )
 
 type Handlers struct {
@@ -118,16 +119,16 @@ func (h *Handlers) ListConversations(c *gin.Context) {
 }
 
 func (h *Handlers) CreateConversation(c *gin.Context) {
-	var in struct {
-		Title   string `json:"title"`
-		Content string `json:"content"`
-	}
-	_ = c.ShouldBindJSON(&in)
 	if cached, ok := h.idempotentGet(c); ok {
 		c.Data(http.StatusOK, "application/json", cached)
 		return
 	}
-	out, err := h.Conv.Create(c.Request.Context(), service.CreateConvIn{Title: in.Title, Content: in.Content})
+	in, err := h.parseCreateIn(c)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	out, err := h.Conv.Create(c.Request.Context(), in)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -193,14 +194,12 @@ func (h *Handlers) PostMessage(c *gin.Context) {
 		c.Data(http.StatusOK, "application/json", cached)
 		return
 	}
-	var in struct {
-		Content string `json:"content"`
-	}
-	if err := c.ShouldBindJSON(&in); err != nil {
-		httpx.Fail(c, httpx.ErrValidation)
+	content, files, err := h.parseMessageIn(c)
+	if err != nil {
+		httpx.Fail(c, err)
 		return
 	}
-	msg, run, err := h.Conv.PostMessage(c.Request.Context(), c.Param("id"), in.Content)
+	msg, run, err := h.Conv.PostMessage(c.Request.Context(), c.Param("id"), content, files)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -356,6 +355,88 @@ func writeSSE(c *gin.Context, id int64, event string, data any) {
 	if f, ok := c.Writer.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func (h *Handlers) parseCreateIn(c *gin.Context) (service.CreateConvIn, error) {
+	if strings.HasPrefix(c.ContentType(), "multipart/form-data") {
+		files, err := h.readFiles(c)
+		if err != nil {
+			return service.CreateConvIn{}, err
+		}
+		return service.CreateConvIn{
+			Title:   c.PostForm("title"),
+			Content: c.PostForm("content"),
+			Files:   files,
+		}, nil
+	}
+	var in struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	return service.CreateConvIn{Title: in.Title, Content: in.Content}, nil
+}
+
+func (h *Handlers) parseMessageIn(c *gin.Context) (string, []upload.Incoming, error) {
+	if strings.HasPrefix(c.ContentType(), "multipart/form-data") {
+		files, err := h.readFiles(c)
+		if err != nil {
+			return "", nil, err
+		}
+		return c.PostForm("content"), files, nil
+	}
+	var in struct {
+		Content string `json:"content"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		return "", nil, httpx.ErrValidation
+	}
+	return in.Content, nil, nil
+}
+
+func (h *Handlers) readFiles(c *gin.Context) ([]upload.Incoming, error) {
+	maxMem := h.Conv.Cfg.UploadMaxBytes * int64(h.Conv.Cfg.UploadMaxFiles+1)
+	if maxMem < 32<<20 {
+		maxMem = 32 << 20
+	}
+	if err := c.Request.ParseMultipartForm(maxMem); err != nil {
+		return nil, httpx.Err(http.StatusBadRequest, "validation", "invalid multipart body")
+	}
+	form := c.Request.MultipartForm
+	if form == nil {
+		return nil, nil
+	}
+	headers := form.File["files"]
+	if len(headers) == 0 {
+		headers = form.File["file"]
+	}
+	if len(headers) > h.Conv.Cfg.UploadMaxFiles {
+		return nil, httpx.Err(http.StatusBadRequest, "validation", "too many files")
+	}
+	out := make([]upload.Incoming, 0, len(headers))
+	for _, fh := range headers {
+		if fh.Size > h.Conv.Cfg.UploadMaxBytes {
+			return nil, httpx.Err(http.StatusBadRequest, "validation", "file is too large")
+		}
+		f, err := fh.Open()
+		if err != nil {
+			return nil, httpx.ErrValidation
+		}
+		data, err := io.ReadAll(io.LimitReader(f, h.Conv.Cfg.UploadMaxBytes+1))
+		_ = f.Close()
+		if err != nil {
+			return nil, httpx.ErrValidation
+		}
+		if int64(len(data)) > h.Conv.Cfg.UploadMaxBytes {
+			return nil, httpx.Err(http.StatusBadRequest, "validation", "file is too large")
+		}
+		item, err := upload.Classify(fh.Filename, data)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, nil
 }
 
 func (h *Handlers) idempotentGet(c *gin.Context) ([]byte, bool) {

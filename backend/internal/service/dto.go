@@ -23,12 +23,20 @@ type RunView struct {
 }
 
 type MessageView struct {
-	ID             string  `json:"id"`
-	ConversationID string  `json:"conversation_id"`
-	RunID          *string `json:"run_id,omitempty"`
-	Role           string  `json:"role"`
-	Content        string  `json:"content"`
-	CreatedAt      string  `json:"created_at"`
+	ID             string            `json:"id"`
+	ConversationID string            `json:"conversation_id"`
+	RunID          *string           `json:"run_id,omitempty"`
+	Role           string            `json:"role"`
+	Content        string            `json:"content"`
+	Attachments    []AttachmentView  `json:"attachments,omitempty"`
+	CreatedAt      string            `json:"created_at"`
+}
+
+type AttachmentView struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
 }
 
 type ListOut[T any] struct {
@@ -50,8 +58,8 @@ func convView(c model.Conversation, run *model.Run) ConversationView {
 	return v
 }
 
-func msgView(m model.Message, convPublic string, runPublic *string) MessageView {
-	return MessageView{
+func msgView(m model.Message, convPublic string, runPublic *string, atts []model.Attachment) MessageView {
+	v := MessageView{
 		ID:             m.PublicID,
 		ConversationID: convPublic,
 		RunID:          runPublic,
@@ -59,6 +67,15 @@ func msgView(m model.Message, convPublic string, runPublic *string) MessageView 
 		Content:        m.Content,
 		CreatedAt:      m.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}
+	if len(atts) > 0 {
+		v.Attachments = make([]AttachmentView, 0, len(atts))
+		for _, a := range atts {
+			v.Attachments = append(v.Attachments, AttachmentView{
+				ID: a.PublicID, Filename: a.Filename, ContentType: a.ContentType, Size: a.SizeBytes,
+			})
+		}
+	}
+	return v
 }
 
 func runView(r model.Run, convPublic string) RunView {

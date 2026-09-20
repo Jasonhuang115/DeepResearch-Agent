@@ -9,6 +9,20 @@ from openai import AsyncOpenAI
 from research_engine.types import ToolCall, TurnResult
 
 
+def _delta_reasoning(delta: Any) -> str:
+    for key in ("reasoning_content", "reasoning"):
+        val = getattr(delta, key, None)
+        if isinstance(val, str) and val:
+            return val
+    extra = getattr(delta, "model_extra", None) or {}
+    if isinstance(extra, dict):
+        for key in ("reasoning_content", "reasoning"):
+            val = extra.get(key)
+            if isinstance(val, str) and val:
+                return val
+    return ""
+
+
 class OpenAICompatLLM:
     def __init__(
         self,
@@ -16,11 +30,13 @@ class OpenAICompatLLM:
         api_key: str,
         model: str,
         base_url: str | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
         self.model = model
+        self._extra_body = extra_body
         self._client = AsyncOpenAI(**kwargs)
 
     async def complete(
@@ -31,6 +47,7 @@ class OpenAICompatLLM:
         tool_choice: str = "auto",
         cancel: asyncio.Event | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_reasoning: Callable[[str], Awaitable[None]] | None = None,
     ) -> TurnResult:
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -40,6 +57,8 @@ class OpenAICompatLLM:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
 
         stream = await self._client.chat.completions.create(**kwargs)
         content_parts: list[str] = []
@@ -77,6 +96,9 @@ class OpenAICompatLLM:
                     content_parts.append(content)
                     if on_delta and not saw_tools:
                         await on_delta(content)
+                reasoning = _delta_reasoning(delta)
+                if reasoning and on_reasoning:
+                    await on_reasoning(reasoning)
         finally:
             aclose = getattr(stream, "aclose", None)
             if callable(aclose):

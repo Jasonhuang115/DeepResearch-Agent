@@ -29,6 +29,10 @@ class LocalDirWorkspace:
         target = resolve_in_root(self.root, path)
         await asyncio.to_thread(_write_text, target, content)
 
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        target = resolve_in_root(self.root, path)
+        await asyncio.to_thread(_write_bytes, target, data)
+
     async def list_files(self, pattern: str = "**/*") -> list[str]:
         pat = reject_escape_pattern(pattern)
         return await asyncio.to_thread(_list_files, self.root, pat)
@@ -62,6 +66,11 @@ def _read_text(path: Path) -> str:
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
 
 
 def _list_files(root: Path, pattern: str) -> list[str]:

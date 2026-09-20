@@ -16,8 +16,9 @@ async def ws(tmp_path: Path) -> LocalDirWorkspace:
 @pytest.mark.asyncio
 async def test_registry_requires_workspace_for_fs_tools() -> None:
     tools = default_registry()
-    assert tools.names() == ["web_search", "Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+    assert tools.names() == ["web_search", "web_fetch", "Read", "Write", "Edit", "Glob", "Grep", "Bash"]
     assert await tools.get("Read")({"path": "a.md"}) == "error: workspace is not available"
+    assert await tools.get("web_search")({"query": "q"}) == "error: workspace is not available"
 
 
 @pytest.mark.asyncio
@@ -104,3 +105,13 @@ async def test_bound_registry_uses_workspace(ws: LocalDirWorkspace) -> None:
     await tools.get("Write")({"path": "a.md", "content": "hi"})
     text = await tools.get("Read")({"path": "a.md"})
     assert "hi" in text
+
+
+@pytest.mark.asyncio
+async def test_sources_are_read_only(ws: LocalDirWorkspace) -> None:
+    assert "read-only" in await write_file(ws, {"path": "sources/ledger.json", "content": "{}"})
+    assert "read-only" in await write_file(ws, {"path": "sources/src_01.md", "content": "nope"})
+    assert "read-only" in await edit_file(
+        ws, {"path": "sources/src_01.md", "old_string": "a", "new_string": "b"}
+    )
+    assert "read-only" in await write_file(ws, {"path": "attachments/x.txt", "content": "nope"})

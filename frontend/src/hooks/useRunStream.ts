@@ -2,14 +2,30 @@ import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { useEffect, useRef, useState } from 'react'
 import { getAccess } from '../api/client'
 import type { AgentEvent } from '../api/types'
+import { formatToolArgs, type ToolCallInfo } from '../components/ToolCallCard'
 
 export type Live = {
   runId: string
   status: string
+  note: string
   reasoning: string
   text: string
-  tools: { id: string; name: string; summary?: string; done: boolean }[]
+  tools: ToolCallInfo[]
   error?: string
+}
+
+function payloadOf(ev: AgentEvent): Record<string, unknown> {
+  const raw = ev.payload
+  if (!raw) return {}
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+  return raw
 }
 
 export function useRunStream(runId: string | null, enabled: boolean) {
@@ -20,14 +36,15 @@ export function useRunStream(runId: string | null, enabled: boolean) {
 
   useEffect(() => {
     if (!runId || !enabled) {
-      setLive(null)
       lastSeq.current = 0
       buf.current = { reasoning: '', text: '' }
+      if (!runId) setLive(null)
       return
     }
     const ac = new AbortController()
-    setLive({ runId, status: 'queued', reasoning: '', text: '', tools: [] })
+    lastSeq.current = 0
     buf.current = { reasoning: '', text: '' }
+    setLive({ runId, status: 'queued', note: '', reasoning: '', text: '', tools: [] })
 
     const flush = () => {
       flushTimer.current = null
@@ -39,16 +56,19 @@ export function useRunStream(runId: string | null, enabled: boolean) {
     }
     const schedule = () => {
       if (flushTimer.current != null) return
-      flushTimer.current = window.setTimeout(flush, 60)
+      flushTimer.current = window.requestAnimationFrame(flush)
     }
 
     const apply = (ev: AgentEvent) => {
       if (ev.seq && ev.seq <= lastSeq.current) return
       if (ev.seq) lastSeq.current = ev.seq
-      const p = ev.payload || {}
+      const p = payloadOf(ev)
       switch (ev.type) {
         case 'run.started':
-          setLive((c) => (c ? { ...c, status: 'running' } : c))
+          setLive((c) => (c ? { ...c, status: 'running', note: c.note || 'thinking' } : c))
+          break
+        case 'run.progress':
+          setLive((c) => (c ? { ...c, status: 'running', note: String(p.note ?? c.note ?? 'thinking') } : c))
           break
         case 'reasoning_delta':
           buf.current.reasoning += String(p.delta ?? '')
@@ -63,7 +83,18 @@ export function useRunStream(runId: string | null, enabled: boolean) {
             if (!c) return c
             const id = String(p.tool_call_id ?? '')
             if (c.tools.some((t) => t.id === id)) return c
-            return { ...c, tools: [...c.tools, { id, name: String(p.name ?? 'tool'), done: false }] }
+            return {
+              ...c,
+              tools: [
+                ...c.tools,
+                {
+                  id,
+                  name: String(p.name ?? 'tool'),
+                  args: formatToolArgs(p.args),
+                  done: false,
+                },
+              ],
+            }
           })
           break
         case 'tool_call.finished':
@@ -73,7 +104,9 @@ export function useRunStream(runId: string | null, enabled: boolean) {
             return {
               ...c,
               tools: c.tools.map((t) =>
-                t.id === id ? { ...t, done: true, summary: String(p.summary ?? '') } : t,
+                t.id === id
+                  ? { ...t, done: true, ok: p.ok !== false, summary: String(p.summary ?? '') }
+                  : t,
               ),
             }
           })
@@ -108,11 +141,14 @@ export function useRunStream(runId: string | null, enabled: boolean) {
           /* ignore unknown */
         }
       },
+      onerror(err) {
+        if (ac.signal.aborted) throw err
+      },
     })
 
     return () => {
       ac.abort()
-      if (flushTimer.current) window.clearTimeout(flushTimer.current)
+      if (flushTimer.current != null) window.cancelAnimationFrame(flushTimer.current)
     }
   }, [runId, enabled])
 

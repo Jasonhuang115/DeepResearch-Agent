@@ -85,6 +85,9 @@ async def _step(
         streamed.append(piece)
         await seq.emit("text_delta", {"delta": piece})
 
+    async def on_reasoning(piece: str) -> None:
+        await seq.emit("reasoning_delta", {"delta": piece})
+
     result = await _complete(
         llm,
         messages,
@@ -96,6 +99,7 @@ async def _step(
         notes,
         prepare,
         on_delta=on_delta,
+        on_reasoning=on_reasoning,
     )
     if result is None:
         return True
@@ -146,15 +150,21 @@ async def _complete(
     notes: list[str],
     prepare: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
     on_delta: Any = None,
+    on_reasoning: Any = None,
 ) -> TurnResult | None:
     await seq.emit("run.progress", {"turn": turn, "note": "thinking"})
     window = prepare(messages)
+
+    async def emit_reasoning(piece: str) -> None:
+        await seq.emit("reasoning_delta", {"delta": piece})
+
     result = await llm.complete(
         window,
         openai_tools,
         tool_choice=tool_choice,
         cancel=cancel,
         on_delta=on_delta,
+        on_reasoning=on_reasoning or emit_reasoning,
     )
     if cancel.is_set():
         await _finish(seq, "cancelled", _partial(notes), "cancelled")

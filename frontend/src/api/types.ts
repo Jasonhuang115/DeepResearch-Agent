@@ -33,7 +33,15 @@ export type Message = {
   run_id?: string | null
   role: 'user' | 'assistant' | 'system' | string
   content: string
+  attachments?: Attachment[]
   created_at: string
+}
+
+export type Attachment = {
+  id: string
+  filename: string
+  content_type: string
+  size: number
 }
 
 export type List<T> = {
@@ -47,6 +55,6 @@ export type AgentEvent = {
   conversation_id?: string
   seq: number
   type: string
-  payload?: Record<string, unknown>
+  payload?: Record<string, unknown> | string
   ts?: string
 }

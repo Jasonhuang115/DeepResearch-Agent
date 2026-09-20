@@ -29,6 +29,7 @@ class LLMClient(Protocol):
         tool_choice: str = "auto",
         cancel: asyncio.Event | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_reasoning: Callable[[str], Awaitable[None]] | None = None,
     ) -> TurnResult: ...
 
 

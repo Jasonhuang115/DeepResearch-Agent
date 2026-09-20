@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent_service.sources.ledger import is_write_protected_path
 from agent_service.workspace.protocol import PathEscapeError, Workspace, WorkspaceError
 
 DESCRIPTION = "Read a text file from the workspace."
@@ -63,6 +64,13 @@ def _path(args: dict[str, Any]) -> str:
     return str(args.get("path") or "").strip()
 
 
+def _protected_error(path: str) -> str:
+    rel = path.replace("\\", "/").lstrip("./")
+    if rel == "attachments" or rel.startswith("attachments/"):
+        return "error: attachments/ is read-only"
+    return "error: sources/ is read-only"
+
+
 def _err(exc: BaseException, path: str = "") -> str:
     if isinstance(exc, PathEscapeError):
         return "error: path escapes workspace"
@@ -104,6 +112,8 @@ async def write_file(workspace: Workspace, args: dict[str, Any]) -> str:
     path = _path(args)
     if not path:
         return "error: path is required"
+    if is_write_protected_path(path):
+        return _protected_error(path)
     if "content" not in args:
         return "error: content is required"
     content = "" if args.get("content") is None else str(args.get("content"))
@@ -118,6 +128,8 @@ async def edit_file(workspace: Workspace, args: dict[str, Any]) -> str:
     path = _path(args)
     if not path:
         return "error: path is required"
+    if is_write_protected_path(path):
+        return _protected_error(path)
     old = args.get("old_string")
     if old is None or old == "":
         return "error: old_string is required"

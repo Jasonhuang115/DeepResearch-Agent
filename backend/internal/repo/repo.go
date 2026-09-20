@@ -167,6 +167,28 @@ func (r *Repo) ListMessages(ctx context.Context, convID int64, beforeID *int64, 
 	return out, nil
 }
 
+func (r *Repo) CreateAttachment(ctx context.Context, a *model.Attachment) error {
+	p := tenant.MustFrom(ctx)
+	a.TenantID = p.TenantID
+	a.UserID = p.UserID
+	return r.DB.System(ctx).Create(a).Error
+}
+
+func (r *Repo) AttachmentsByMessageIDs(ctx context.Context, ids []int64) (map[int64][]model.Attachment, error) {
+	out := map[int64][]model.Attachment{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []model.Attachment
+	if err := r.scoped(ctx).Where("message_id IN ?", ids).Order("id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, a := range rows {
+		out[a.MessageID] = append(out[a.MessageID], a)
+	}
+	return out, nil
+}
+
 func (r *Repo) History(ctx context.Context, convID int64, limit int) ([]model.Message, error) {
 	var out []model.Message
 	err := r.sys(ctx).Where("conversation_id = ?", convID).Order("id DESC").Limit(limit).Find(&out).Error

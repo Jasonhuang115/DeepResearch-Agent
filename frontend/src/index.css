@@ -29,3 +29,170 @@ textarea { resize: none; }
 a { color: inherit; }
 
 ::selection { background: #333; }
+
+.dx-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 10px;
+}
+
+.dx-tool {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.dx-tool--open {
+  border-color: var(--line);
+  background: var(--bg);
+}
+
+.dx-tool--running {
+  border-color: color-mix(in srgb, #6ea8fe 40%, var(--line));
+  background: var(--bg);
+}
+
+.dx-tool__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dx-tool--running .dx-tool__head {
+  cursor: default;
+}
+
+.dx-tool__icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  color: var(--muted);
+}
+
+.dx-tool--running .dx-tool__icon {
+  color: #6ea8fe;
+}
+
+.dx-tool--ok .dx-tool__icon {
+  color: #6dbf8a;
+}
+
+.dx-tool--err .dx-tool__icon {
+  color: #e06c75;
+}
+
+.dx-tool__spin {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: dx-spin 0.7s linear infinite;
+}
+
+@keyframes dx-spin {
+  to { transform: rotate(360deg); }
+}
+
+.dx-tool__name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  flex: none;
+}
+
+.dx-tool__args {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dx-tool__status {
+  font-size: 10.5px;
+  color: var(--muted);
+  flex: none;
+}
+
+.dx-tool--ok .dx-tool__status {
+  color: #6dbf8a;
+}
+
+.dx-tool--err .dx-tool__status {
+  color: #e06c75;
+}
+
+.dx-tool__chev {
+  flex: none;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.dx-tool__out {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  background: var(--hover);
+  border-top: 1px solid var(--line);
+  padding: 6px 10px 6px 32px;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.dx-tool--ok:not(.dx-tool--open) .dx-tool__head,
+.dx-tool--err:not(.dx-tool--open) .dx-tool__head {
+  padding: 2px 6px;
+  gap: 6px;
+}
+
+.dx-tool--ok:not(.dx-tool--open) .dx-tool__icon {
+  color: var(--muted);
+}
+
+.dx-tool--ok:not(.dx-tool--open) .dx-tool__name,
+.dx-tool--err:not(.dx-tool--open) .dx-tool__name {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.dx-filechip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  background: var(--hover);
+  color: var(--text);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.dx-filechip__size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dx-filechip--static {
+  cursor: default;
+}

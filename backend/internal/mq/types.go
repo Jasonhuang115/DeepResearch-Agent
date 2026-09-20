@@ -16,7 +16,16 @@ type Command struct {
 }
 
 type Request struct {
-	Content string `json:"content"`
+	Content     string          `json:"content"`
+	Attachments []AttachmentRef `json:"attachments,omitempty"`
+}
+
+type AttachmentRef struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Path        string `json:"path"`
+	Size        int64  `json:"size"`
 }
 
 type Msg struct {

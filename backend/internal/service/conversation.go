@@ -15,6 +15,7 @@ import (
 	"deepresearch/internal/mq"
 	"deepresearch/internal/repo"
 	"deepresearch/internal/tenant"
+	"deepresearch/internal/upload"
 )
 
 type Conversations struct {
@@ -68,17 +69,22 @@ func (s *Conversations) Get(ctx context.Context, publicID string) (*Conversation
 type CreateConvIn struct {
 	Title   string
 	Content string
+	Files   []upload.Incoming
 }
 
 func (s *Conversations) Create(ctx context.Context, in CreateConvIn) (map[string]any, error) {
 	title := strings.TrimSpace(in.Title)
 	content := strings.TrimSpace(in.Content)
-	if content != "" {
-		if err := validateContent(content); err != nil {
+	if content != "" || len(in.Files) > 0 {
+		if err := validateMessage(content, len(in.Files)); err != nil {
 			return nil, err
 		}
-		if title == "" {
+	}
+	if title == "" {
+		if content != "" {
 			title = titleFrom(content)
+		} else if len(in.Files) > 0 {
+			title = titleFrom(in.Files[0].Filename)
 		}
 	}
 	if title == "" {
@@ -88,11 +94,11 @@ func (s *Conversations) Create(ctx context.Context, in CreateConvIn) (map[string
 	if err := s.Repo.CreateConversation(ctx, c); err != nil {
 		return nil, err
 	}
-	if content == "" {
+	if content == "" && len(in.Files) == 0 {
 		v := convView(*c, nil)
 		return map[string]any{"conversation": v}, nil
 	}
-	msg, run, err := s.startRun(ctx, c, content)
+	msg, run, err := s.startRun(ctx, c, content, in.Files)
 	if err != nil {
 		return nil, err
 	}
@@ -163,6 +169,14 @@ func (s *Conversations) Messages(ctx context.Context, convPublic string, beforeI
 		items = items[1:]
 	}
 	out := make([]MessageView, 0, len(items))
+	ids := make([]int64, 0, len(items))
+	for _, m := range items {
+		ids = append(ids, m.ID)
+	}
+	byMsg, err := s.Repo.AttachmentsByMessageIDs(ctx, ids)
+	if err != nil {
+		return ListOut[MessageView]{}, err
+	}
 	for _, m := range items {
 		var rp *string
 		if m.RunID != nil {
@@ -170,13 +184,14 @@ func (s *Conversations) Messages(ctx context.Context, convPublic string, beforeI
 				rp = &run.PublicID
 			}
 		}
-		out = append(out, msgView(m, c.PublicID, rp))
+		out = append(out, msgView(m, c.PublicID, rp, byMsg[m.ID]))
 	}
 	return ListOut[MessageView]{Items: out, NextBefore: next}, nil
 }
 
-func (s *Conversations) PostMessage(ctx context.Context, convPublic, content string) (MessageView, RunView, error) {
-	if err := validateContent(content); err != nil {
+func (s *Conversations) PostMessage(ctx context.Context, convPublic, content string, files []upload.Incoming) (MessageView, RunView, error) {
+	content = strings.TrimSpace(content)
+	if err := validateMessage(content, len(files)); err != nil {
 		return MessageView{}, RunView{}, err
 	}
 	c, err := s.Repo.ConversationByPublic(ctx, convPublic)
@@ -186,14 +201,17 @@ func (s *Conversations) PostMessage(ctx context.Context, convPublic, content str
 	if c == nil {
 		return MessageView{}, RunView{}, httpx.ErrNotFound
 	}
-	mv, run, err := s.startRun(ctx, c, content)
+	mv, run, err := s.startRun(ctx, c, content, files)
 	if err != nil {
 		return MessageView{}, RunView{}, err
 	}
 	return mv, runView(*run, c.PublicID), nil
 }
 
-func (s *Conversations) startRun(ctx context.Context, c *model.Conversation, content string) (MessageView, *model.Run, error) {
+func (s *Conversations) startRun(ctx context.Context, c *model.Conversation, content string, files []upload.Incoming) (MessageView, *model.Run, error) {
+	if err := s.checkFiles(files); err != nil {
+		return MessageView{}, nil, err
+	}
 	p := tenant.MustFrom(ctx)
 	run := &model.Run{
 		PublicID:       id.New("run_"),
@@ -225,6 +243,10 @@ func (s *Conversations) startRun(ctx context.Context, c *model.Conversation, con
 	if err := s.Repo.CreateMessage(ctx, um); err != nil {
 		return MessageView{}, nil, err
 	}
+	saved, err := s.saveAttachments(ctx, c.ID, um.ID, files)
+	if err != nil {
+		return MessageView{}, nil, err
+	}
 	_ = s.Repo.TouchConversation(ctx, c.ID)
 
 	hist, _ := s.Repo.History(ctx, c.ID, s.Cfg.HistoryMessageLimit)
@@ -237,18 +259,67 @@ func (s *Conversations) startRun(ctx context.Context, c *model.Conversation, con
 		}
 		msgs = append(msgs, mq.Msg{ID: m.PublicID, Role: m.Role, Content: m.Content})
 	}
+	refs := make([]mq.AttachmentRef, 0, len(saved))
+	for _, a := range saved {
+		abs, err := upload.Abs(s.Cfg.UploadDir, a.StoragePath)
+		if err != nil {
+			return MessageView{}, nil, err
+		}
+		refs = append(refs, mq.AttachmentRef{
+			ID: a.PublicID, Filename: a.Filename, ContentType: a.ContentType,
+			Path: abs, Size: a.SizeBytes,
+		})
+	}
 	cmd := mq.Command{
 		V: 1, Type: "start",
 		RunID: run.PublicID, ConversationID: c.PublicID,
 		TenantID: p.TenantPublic, UserID: p.UserPublic,
-		Request: &mq.Request{Content: content},
+		Request:  &mq.Request{Content: content, Attachments: refs},
 		Messages: msgs, CreatedAt: time.Now().UTC(),
 	}
 	if err := s.Producer.Write(ctx, s.Cfg.CommandsTopic, c.PublicID, cmd); err != nil {
 		// sweeper will fail the queued run
 	}
 	rp := run.PublicID
-	return msgView(*um, c.PublicID, &rp), run, nil
+	return msgView(*um, c.PublicID, &rp, saved), run, nil
+}
+
+func (s *Conversations) checkFiles(files []upload.Incoming) error {
+	if len(files) > s.Cfg.UploadMaxFiles {
+		return httpx.Err(400, "validation", "too many files")
+	}
+	for _, f := range files {
+		if int64(len(f.Data)) > s.Cfg.UploadMaxBytes {
+			return httpx.Err(400, "validation", "file is too large")
+		}
+	}
+	return nil
+}
+
+func (s *Conversations) saveAttachments(ctx context.Context, convID, messageID int64, files []upload.Incoming) ([]model.Attachment, error) {
+	out := make([]model.Attachment, 0, len(files))
+	for _, f := range files {
+		publicID := id.New("att_")
+		rel, err := upload.Write(s.Cfg.UploadDir, publicID, f.Data)
+		if err != nil {
+			return nil, err
+		}
+		row := &model.Attachment{
+			PublicID:       publicID,
+			ConversationID: convID,
+			MessageID:      messageID,
+			Filename:       f.Filename,
+			ContentType:    f.ContentType,
+			SizeBytes:      int64(len(f.Data)),
+			SHA256:         upload.SHA256(f.Data),
+			StoragePath:    rel,
+		}
+		if err := s.Repo.CreateAttachment(ctx, row); err != nil {
+			return nil, err
+		}
+		out = append(out, *row)
+	}
+	return out, nil
 }
 
 func (s *Conversations) GetRun(ctx context.Context, publicID string) (*RunView, error) {
@@ -318,11 +389,17 @@ func (s *Conversations) Events(ctx context.Context, runPublic string, after int6
 	return out, nil
 }
 
-func validateContent(s string) error {
-	s = strings.TrimSpace(s)
-	n := utf8.RuneCountInString(s)
-	if n < 1 || n > 32000 {
-		return httpx.Err(400, "validation", "content must be 1-32000 characters")
+func validateMessage(content string, nFiles int) error {
+	n := utf8.RuneCountInString(content)
+	if n > 32000 {
+		return httpx.Err(400, "validation", "content must be at most 32000 characters")
+	}
+	if n < 1 && nFiles == 0 {
+		return httpx.Err(400, "validation", "content or at least one file is required")
 	}
 	return nil
+}
+
+func validateContent(s string) error {
+	return validateMessage(strings.TrimSpace(s), 0)
 }

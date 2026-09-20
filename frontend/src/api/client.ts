@@ -61,7 +61,9 @@ type Opts = RequestInit & { skipAuth?: boolean }
 
 export async function api<T>(path: string, opts: Opts = {}): Promise<T> {
   const headers = new Headers(opts.headers)
-  if (!headers.has('Content-Type') && opts.body) headers.set('Content-Type', 'application/json')
+  const form = typeof FormData !== 'undefined' && opts.body instanceof FormData
+  if (form) headers.delete('Content-Type')
+  else if (!headers.has('Content-Type') && opts.body) headers.set('Content-Type', 'application/json')
   const token = getAccess()
   if (token && !opts.skipAuth) headers.set('Authorization', `Bearer ${token}`)
   let res = await fetch(path, { ...opts, headers })

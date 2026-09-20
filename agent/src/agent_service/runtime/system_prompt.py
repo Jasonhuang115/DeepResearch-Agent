@@ -55,6 +55,7 @@ def build_system_prompt(
     conversation_id: str = "",
     run_id: str = "",
     reply_language: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> str:
     sections: list[str] = []
     for fragment in _BASE_FRAGMENTS:
@@ -68,6 +69,8 @@ def build_system_prompt(
         "conversation_id": conversation_id,
         "run_id": run_id,
     }
+    if extra:
+        context_payload.update(extra)
     sections.append("<context>")
     sections.append(json.dumps(context_payload, ensure_ascii=False, indent=2))
     sections.append("</context>")

@@ -27,6 +27,7 @@ class ScriptedLLM:
         tool_choice: str = "auto",
         cancel: asyncio.Event | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_reasoning: Callable[[str], Awaitable[None]] | None = None,
     ) -> TurnResult:
         self.calls.append(
             {
@@ -37,6 +38,7 @@ class ScriptedLLM:
         )
         if cancel is not None and cancel.is_set():
             return TurnResult(finish_reason="cancelled")
+        _ = on_reasoning
         if not self._turns:
             return TurnResult(finish_reason="stop")
         turn = self._turns.pop(0)

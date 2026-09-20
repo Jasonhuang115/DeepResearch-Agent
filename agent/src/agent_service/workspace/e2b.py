@@ -48,6 +48,10 @@ class E2BWorkspace:
         target = resolve_posix(self.home, path)
         await self.client.write(target, content)
 
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        target = resolve_posix(self.home, path)
+        await self.client.write(target, data)
+
     async def list_files(self, pattern: str = "**/*") -> list[str]:
         pat = reject_escape_pattern(pattern)
         names = await self.client.list_files(self.home)
@@ -111,7 +115,7 @@ class SDKSandbox:
             return data.decode("utf-8")
         return str(data)
 
-    async def write(self, abs_path: str, content: str) -> None:
+    async def write(self, abs_path: str, content: str | bytes) -> None:
         parent = os.path.dirname(abs_path)
         if parent and parent not in {"/", self._home()}:
             mkdir = getattr(getattr(self._raw, "files", None), "make_dir", None)
@@ -194,16 +198,19 @@ def try_sdk_factory(api_key: str) -> E2BFactory | None:
 @dataclass
 class FakeE2BSandbox:
     sandbox_id: str
-    fs: dict[str, str] = field(default_factory=dict)
+    fs: dict[str, str | bytes] = field(default_factory=dict)
     timeout: int = 3600
 
     async def read(self, abs_path: str) -> str:
         path = os.path.normpath(abs_path)
         if path not in self.fs:
             raise FileNotFoundError(path)
-        return self.fs[path]
+        data = self.fs[path]
+        if isinstance(data, bytes):
+            return data.decode("utf-8")
+        return data
 
-    async def write(self, abs_path: str, content: str) -> None:
+    async def write(self, abs_path: str, content: str | bytes) -> None:
         self.fs[os.path.normpath(abs_path)] = content
 
     async def list_files(self, root: str) -> list[str]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -23,8 +24,15 @@ class _Stream:
         return None
 
 
-def _chunk(*, content: str | None = None, tool_calls: list | None = None):
-    return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=tool_calls))])
+def _chunk(*, content: str | None = None, tool_calls: list | None = None, reasoning_content: str | None = None):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=content, tool_calls=tool_calls, reasoning_content=reasoning_content),
+                finish_reason=None,
+            )
+        ]
+    )
 
 
 def _tool_delta(*, index: int, id: str | None = None, name: str | None = None, arguments: str | None = None):
@@ -59,3 +67,55 @@ async def test_openai_buffers_streamed_tool_calls(monkeypatch: pytest.MonkeyPatc
     assert result.tool_calls[0].id == "call_1"
     assert result.tool_calls[0].name == "web_search"
     assert result.tool_calls[0].arguments == '{"query":"solid state"}'
+
+
+@pytest.mark.asyncio
+async def test_openai_forwards_reasoning_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
+    chunks = [
+        _chunk(reasoning_content="Check the "),
+        _chunk(reasoning_content="timeline."),
+        _chunk(content="CATL is still in trial production."),
+    ]
+    llm = OpenAILLM(api_key="sk-test", model="gpt-4.1-mini")
+
+    async def fake_create(**_kwargs):
+        return _Stream(chunks)
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
+    reasoning: list[str] = []
+    text: list[str] = []
+    result = await llm.complete(
+        [{"role": "user", "content": "q"}],
+        [],
+        on_delta=async_append(text),
+        on_reasoning=async_append(reasoning),
+    )
+    assert result.content == "CATL is still in trial production."
+    assert "".join(reasoning) == "Check the timeline."
+    assert "".join(text) == "CATL is still in trial production."
+
+
+@pytest.mark.asyncio
+async def test_openai_sends_thinking_extra_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    llm = OpenAILLM(
+        api_key="sk-test",
+        model="deepseek-flash",
+        extra_body={"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
+    )
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _Stream([_chunk(content="ok")])
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
+    await llm.complete([{"role": "user", "content": "q"}], [])
+    assert captured["model"] == "deepseek-flash"
+    assert captured["extra_body"] == {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+
+
+def async_append(parts: list[str]):
+    async def _on(piece: str) -> None:
+        parts.append(piece)
+
+    return _on

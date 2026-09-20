@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"deepresearch/internal/upload"
 )
 
 type Config struct {
@@ -25,6 +27,9 @@ type Config struct {
 	RateLimitPerMinute  int           `env:"RATE_LIMIT_PER_MINUTE" envDefault:"120"`
 	HistoryMessageLimit int           `env:"HISTORY_MESSAGE_LIMIT" envDefault:"40"`
 	HistoryCharLimit    int           `env:"HISTORY_CHAR_LIMIT" envDefault:"80000"`
+	UploadDir           string        `env:"UPLOAD_DIR" envDefault:"data/uploads"`
+	UploadMaxBytes      int64         `env:"UPLOAD_MAX_BYTES" envDefault:"20971520"`
+	UploadMaxFiles      int           `env:"UPLOAD_MAX_FILES" envDefault:"5"`
 }
 
 func Load() (Config, error) {
@@ -43,6 +48,13 @@ func Load() (Config, error) {
 	}
 	for i, o := range c.CORSOrigins {
 		c.CORSOrigins[i] = strings.TrimSpace(o)
+	}
+	c.UploadDir = upload.ResolveDir(c.UploadDir)
+	if c.UploadMaxBytes <= 0 {
+		c.UploadMaxBytes = 20 << 20
+	}
+	if c.UploadMaxFiles <= 0 {
+		c.UploadMaxFiles = 5
 	}
 	return c, nil
 }

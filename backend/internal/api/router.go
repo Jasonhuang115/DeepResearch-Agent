@@ -22,6 +22,11 @@ type Deps struct {
 func Router(d Deps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	maxMem := d.Cfg.UploadMaxBytes * int64(d.Cfg.UploadMaxFiles)
+	if maxMem < 32<<20 {
+		maxMem = 32 << 20
+	}
+	r.MaxMultipartMemory = maxMem
 	r.Use(middleware.Recover(), middleware.RequestID(), middleware.CORS(d.Cfg.CORSOrigins))
 	r.GET("/healthz", func(c *gin.Context) { c.String(200, "ok") })
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))

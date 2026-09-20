@@ -85,6 +85,23 @@ type Message struct {
 
 func (Message) TableName() string { return "messages" }
 
+type Attachment struct {
+	ID             int64     `gorm:"primaryKey"`
+	PublicID       string    `gorm:"column:public_id;size:40;uniqueIndex"`
+	TenantID       int64     `gorm:"index"`
+	UserID         int64     `gorm:"index"`
+	ConversationID int64     `gorm:"index"`
+	MessageID      int64     `gorm:"column:message_id;index"`
+	Filename       string    `gorm:"size:255"`
+	ContentType    string    `gorm:"column:content_type;size:127"`
+	SizeBytes      int64     `gorm:"column:size_bytes"`
+	SHA256         string    `gorm:"column:sha256;size:64"`
+	StoragePath    string    `gorm:"column:storage_path;size:512"`
+	CreatedAt      time.Time `gorm:"autoCreateTime"`
+}
+
+func (Attachment) TableName() string { return "attachments" }
+
 type RunEvent struct {
 	ID             int64          `gorm:"primaryKey"`
 	TenantID       int64          `gorm:"index"`

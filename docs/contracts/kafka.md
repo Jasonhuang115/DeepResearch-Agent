@@ -7,4 +7,6 @@ Topics:
 
 Command types: `start`, `cancel`. Same topic so cancel reaches the instance holding the run.
 
+`start.request` may include `attachments[]` with `id`, `filename`, `content_type`, `path` (absolute file on the shared upload dir), `size`. Bytes stay off Kafka.
+
 Event `seq` is per-run, starting at 1, assigned by Agent. Go upserts on `(run_id, seq)`.

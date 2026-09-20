@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
+	"time"
 
 	"deepresearch/internal/cache"
 	"deepresearch/internal/config"
@@ -38,8 +40,8 @@ func TestCrossUserConversationIs404(t *testing.T) {
 	conv := &service.Conversations{Repo: r, Redis: rdb, Producer: prod, Cfg: cfg}
 	engine := Router(Deps{Cfg: cfg, Auth: auth, Conv: conv, Redis: rdb, Hub: sse.New()})
 
-	tokA := register(t, engine, "a@example.com", "password1", "Ada")
-	tokB := register(t, engine, "b@example.com", "password1", "Bob")
+	tokA := register(t, engine, uniqueEmail("a"), "password1", "Ada")
+	tokB := register(t, engine, uniqueEmail("b"), "password1", "Bob")
 	convID := createConv(t, engine, tokA)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/conversations/"+convID, nil)
@@ -89,4 +91,8 @@ func createConv(t *testing.T, h http.Handler, token string) string {
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &env)
 	return env.Data.Conversation.ID
+}
+
+func uniqueEmail(prefix string) string {
+	return prefix + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + "@example.com"
 }

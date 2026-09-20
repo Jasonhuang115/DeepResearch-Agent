@@ -65,6 +65,7 @@ func (d *DB) installScopeGuard() {
 		"messages":      true,
 		"runs":          true,
 		"run_events":    true,
+		"attachments":   true,
 	}
 	_ = d.Gorm.Callback().Query().Before("gorm:query").Register("tenant:guard", func(db *gorm.DB) {
 		if db == nil || db.Statement == nil || tenant.IsSystem(db.Statement.Context) {
