@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 
 class Settings:
@@ -14,6 +16,15 @@ class Settings:
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "")
     max_turns: int = int(os.getenv("AGENT_MAX_TURNS", "8"))
+    workspace_mode: str = os.getenv("AGENT_WORKSPACE", "auto")
+    workspace_root: str = os.getenv(
+        "AGENT_WORKSPACE_ROOT",
+        str(Path(tempfile.gettempdir()) / "research-workspaces"),
+    )
+    e2b_api_key: str = os.getenv("E2B_API_KEY", "")
+    e2b_timeout_sec: int = int(os.getenv("E2B_TIMEOUT_SEC", "3600"))
+    sandbox_redis_ttl_sec: int = int(os.getenv("AGENT_SANDBOX_REDIS_TTL_SEC", "3300"))
+    redis_addr: str = os.getenv("REDIS_ADDR", "127.0.0.1:6379")
 
 
 settings = Settings()

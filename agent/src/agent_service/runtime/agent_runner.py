@@ -6,6 +6,7 @@ from agent_service.config import settings
 from agent_service.context import pack_messages, prepare_messages
 from agent_service.runtime.system_prompt import build_system_prompt, detect_reply_language
 from agent_service.tools import ToolRegistry, default_registry
+from agent_service.workspace import WorkspaceProvider, default_provider
 from research_engine.llm.openai_compat import OpenAICompatLLM
 from research_engine.loop import run_loop
 from research_engine.types import EventEmitter, LLMClient
@@ -21,16 +22,15 @@ async def run_research(
     llm: LLMClient | None = None,
     tools: ToolRegistry | None = None,
     max_turns: int | None = None,
+    workspace_provider: WorkspaceProvider | None = None,
 ) -> None:
     limit = settings.max_turns if max_turns is None else max_turns
-    registry = tools or default_registry()
     question = ((cmd.get("request") or {}).get("content") or "").strip()
     system = build_system_prompt(
         conversation_id=str(cmd.get("conversation_id") or ""),
         run_id=str(cmd.get("run_id") or ""),
         reply_language=detect_reply_language(question),
     )
-    messages = _chat_messages(cmd, system)
 
     if llm is None:
         if not settings.openai_api_key:
@@ -45,6 +45,15 @@ async def run_research(
             base_url=settings.openai_base_url or None,
         )
 
+    registry = tools
+    if registry is None:
+        provider = workspace_provider or default_provider()
+        workspace = await provider.ensure(str(cmd.get("conversation_id") or ""))
+        if workspace.notice:
+            system = f"{system.rstrip()}\n\n<workspace>\n{workspace.notice}\n</workspace>\n"
+        registry = default_registry(workspace)
+
+    messages = _chat_messages(cmd, system)
     model = getattr(llm, "model", None) or settings.openai_model
     await seq.emit("run.started", {"model": model})
     await run_loop(

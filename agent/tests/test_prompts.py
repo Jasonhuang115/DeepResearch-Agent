@@ -15,7 +15,12 @@ def test_prompt_fragment_order_and_tags() -> None:
     assert "web_search" in text
     assert "Read" in text
     assert "Write" in text
+    assert "Edit" in text
+    assert "Glob" in text
+    assert "Grep" in text
     assert "Bash" in text
+    assert "Mock only" in text
+    assert "**Not implemented.**" not in text
 
 
 def test_detect_reply_language() -> None:
@@ -25,4 +30,4 @@ def test_detect_reply_language() -> None:
 
 def test_default_registry_tools() -> None:
     names = default_registry().names()
-    assert names == ["web_search", "Read", "Write", "Bash"]
+    assert names == ["web_search", "Read", "Write", "Edit", "Glob", "Grep", "Bash"]
