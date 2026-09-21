@@ -1,9 +1,9 @@
 # Agent 系统后续待做的 feature
 
 Date: 2026-09-21
-Status: 第 1 节已落地（search/fetch/上传/SSRF）。第 2–3 节（压缩 + 文件记忆 + OSS）在 `feat/context-memory`。其余仍是 backlog。
+Status: 第 1–3 节已落地（search/fetch/上传、四章压缩、OSS 文件记忆）。其余仍是 backlog。绑定加固（Redis/本地路径带 tenant、禁止 `tenants/default/`）见第 3.3 节。
 
-当前已有：`research_engine` loop、真实 `web_search`/`web_fetch`、来源账本、用户上传进沙箱、Read/Write/Bash（本地或 E2B）。
+当前已有：`research_engine` loop、真实 `web_search`/`web_fetch`、来源账本、用户上传、Read/Write/Bash（本地或 E2B）、overflow、会话 OSS 前缀、沙箱 hydrate、7 天前缀 GC。
 
 相关文档：
 
@@ -50,7 +50,7 @@ Go 仍是上传入口（鉴权、租户、体积限制），agent 只消费已�
 
 ## 2. 上下文压缩
 
-**状态：本 PR。** 不做滑窗当唯一策略。不丢弃未过期的工具全文（coding agent 那套不适用）。
+**状态：done**（`feat/context-memory`）。不做滑窗当唯一策略。不丢弃未过期的工具全文（coding agent 那套不适用）。
 
 ### 2.1 摘要式压缩
 
@@ -77,24 +77,59 @@ Go 仍是上传入口（鉴权、租户、体积限制），agent 只消费已�
 
 ## 3. 基于文件系统的记忆管理（Deep Research）
 
-**状态：本 PR，与第 2 节同一分支。** 工具正文真源是阿里云 OSS（按租户/会话前缀），本会话沙箱是工作副本。不把正文放 Redis。
+**状态：done**（`feat/context-memory`）。不是向量库。真源是阿里云 OSS（按租户/会话前缀），本会话沙箱是工作副本。正文不进 Redis。Redis 只记 `sandbox_id` 映射。
+
+房间号（沙箱死了还靠这对键找回文件，不用旧 sandbox_id）：
 
 ```text
-OSS tenants/{tenant_id}/conversations/{conversation_id}/
-  sources/index.json
-  sources/ledger.json
-  sources/{source_id}.md
-  tool-output/{run_id}/{id}.txt
-
-沙箱（仅本前缀 hydrate）
-  以上路径 + attachments/ + memory/notes.md + memory/findings.md + memory/open-questions.md + report.md
+tenants/{tenant_id}/conversations/{conversation_id}/
 ```
 
-- `sources/` 与 `attachments/` 模型只读。
-- `memory/findings.md` / `open-questions.md` 由压缩器写；`notes.md` 与 `report.md` 模型可写。
-- `ensure` 重建空沙箱后只 LIST/GET 这一 OSS 前缀。
-- 检索：先 Read `sources/index.json`，再 Read `sources/{id}.md`。
-- 不做向量检索。
+### 3.1 文件夹
+
+```text
+sources/
+  index.json          目录：id / 工具 / 标题 / 路径。摘要「工具正文」章从这里机械生成
+  ledger.json         账本：url、查询、成功/失败
+  src_01.md …         每条来源全文（fetch / 搜索摘要 / 上传抽取）
+tool-output/
+  {run_id}/{id}.txt   Bash/Read 等超长结果全文；web_* 不在此再抄一份
+attachments/          用户上传原件（只读）。抽文本另写入 sources/
+memory/
+  findings.md         压缩器写：已完成子任务（Done）
+  open-questions.md   压缩器写：未决 / 焦点 / 矛盾（Continue）
+  notes.md            模型可 Edit 的草稿纸
+report.md             当前研究报告草稿（模型可写）
+brief.md              对齐后的研究目标（Grill 未做；有则压缩抄进 Goal）
+```
+
+`subagents/` 见第 4 节，未做。
+
+权限：`sources/` 与 `attachments/` 模型只读。检索：先 Read `sources/index.json`，再 Read 路径。数字和原文不靠摘要里的改写。
+
+寿命：E2B 沙箱默认 1 小时（`E2B_TIMEOUT_SEC=3600`；run 内每 60s keepalive，Redis 映射 TTL 3300s）。OSS 前缀闲置 7 天或会话删除则整前缀删掉。同一会话新沙箱只 LIST/GET 这一前缀 hydrate。
+
+### 3.2 租户隔离（产品路径）
+
+认人发生在 Go，不把用户 JWT 送进沙箱或 OSS。
+
+1. HTTP `Authorization: Bearer`，JWT 里是 `ten_` / `usr_`，不能靠 query 换租户。
+2. SQL 固定 `tenant_id + user_id`。别人的 `conv_` 对你是 404。
+3. Kafka `start` 带这对公开 id。Agent hydrate / 双写只用 `tenants/{ten_}/conversations/{conv_}/`。
+4. `conversations.public_id` 全局唯一，不会两租户撞同一 `conv_`。
+5. 沙箱 Bash 环境剥掉 OSS / API 密钥。模型只看到自己沙箱里的文件。
+
+A 的沙箱挂不上 B 的盘：A 的命令里没有 B 的 `(ten_, conv_)`，Agent 不会 LIST 那条前缀。
+
+### 3.3 绑定还要补（不做会话 STS）
+
+产品路径已经够用。边缘漏洞：
+
+- `session_prefix` 缺 `tenant_id` 会落到 `tenants/default/`，应直接失败。
+- Redis 键仍是 `sandbox:{conversation_id}`，E2B `ensure` 没用上 tenant。应改成 `sandbox:{tenant}:{cid}`，value 带上 tenant + cid + sandbox_id，reconnect 对不上就当新沙箱。
+- 本地工作区仍是 `{root}/{cid}`，应改成 `{root}/{tenant}/{cid}`。
+
+会话级 STS（Go 验 JWT 后签发只覆盖该前缀的临时钥）针对「Agent 宿主机被打穿」。当前一把 RAM 账号 + 代码只扫一个前缀。Kafka 命令仍是内部信任边界。STS 另开。
 
 ---
 
@@ -469,8 +504,8 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 
 ## 建议顺序
 
-0. 第 14 节工作区 + 第 1 节 search/fetch/上传：**已做**。
-1. **本 PR：** overflow + 四章摘要压缩 + OSS 会话前缀 + 7 天清理
+0. 第 14 节工作区 + 第 1 节 search/fetch/上传 + 第 2–3 节压缩/OSS 记忆：**已做**。
+1. 绑定加固（第 3.3 节）：Redis/本地路径带 tenant，禁止空 tenant → `default`
 2. 来源可到达 / 质量标签进 ledger
 3. 阻塞型 subagent + 落盘报告。**不要先做 Teams。**
 4. Opik trace（开发消耗）；用户轨迹 UI 可并行
@@ -485,7 +520,7 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 
 **问题：** 问答 loop 已经能跑，但工具没有工作区、长输出不会续写、上下文不会裁。后面接第 1–13 节时，应先补这些缝，而不是改 loop 结构。
 
-挂钩已经在代码里：`default_registry()`、`prepare_messages()`（本 PR 为配对安全摘要压缩）、`FinishKind.OUTPUT_LIMIT`（现在当截断终稿，不续写）。不要再抽一层空的 Sandbox Protocol，除非同时接上第一种真实工作区。
+挂钩已经在代码里：`default_registry()`、`prepare_messages()`（配对安全摘要压缩）、`FinishKind.OUTPUT_LIMIT`（现在当截断终稿，不续写）。不要再抽一层空的 Sandbox Protocol。
 
 ### 14.1 工作区，让 Read / Write / Bash 真正执行
 
@@ -495,8 +530,8 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 
 - 会话级工作区（架构稿的 E2B；本地可用目录降级，接口同一套 `read` / `write` / `bash`）。
 - 只改 [`fs.py`](../agent/src/agent_service/tools/fs.py) / [`bash.py`](../agent/src/agent_service/tools/bash.py) 的函数体和 [`02-primitives.md`](../agent/src/agent_service/prompts/02-primitives.md) 里「未实现」的句子。loop、prompt 组装、Kafka 契约不动。
-- Redis 记 `conversation_id → sandbox_id`（或本地路径）；ensure / keepalive / 重建失败要告诉模型「上一轮工作区丢了」。
-- 密钥不进沙箱。Bash 禁网；出网只走以后的 search/fetch。
+- Redis 记 sandbox 映射（现状 `sandbox:{conversation_id}`；带租户的键见第 3.3 节）；ensure / keepalive / 重建失败要告诉模型「上一轮工作区丢了」。
+- 密钥不进沙箱。Bash 禁网；出网只走 search/fetch。
 
 可顺带注册、本轮没挂上的文件原语：`Glob` / `Grep` / `Edit`。`TodoWrite` 整表替换 + 透传 `todo.updated`（Go 只存转发）。
 
@@ -518,7 +553,7 @@ Go `AGENT_BASE_URL` 反代 `GET /v1/runs/{run_id}/artifacts/{path}`：本轮 Fas
 
 ### 14.4 上下文滑窗
 
-摘要式压缩见第 2.1 节（本 PR）。启发式 token；配对安全分块；不做滑窗当唯一策略。
+摘要式压缩见第 2.1 节（已做）。启发式 token；配对安全分块；不做滑窗当唯一策略。
 
 ### 14.5 不要在本层再做的
 
