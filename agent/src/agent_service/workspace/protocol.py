@@ -39,7 +39,7 @@ class Workspace(Protocol):
 
 
 class WorkspaceProvider(Protocol):
-    async def ensure(self, conversation_id: str) -> Workspace: ...
+    async def ensure(self, conversation_id: str, tenant_id: str | None = None) -> Workspace: ...
 
 
 class SandboxIdStore(Protocol):

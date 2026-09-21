@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from research_engine.types import ToolCall
+
 ToolFn = Callable[[dict[str, Any]], Awaitable[str]]
 
 
@@ -18,6 +20,7 @@ class ToolSpec:
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
+        self.overflow: Any | None = None
 
     def register(
         self,
@@ -48,3 +51,8 @@ class ToolRegistry:
             }
             for spec in self._tools.values()
         ]
+
+    async def after_result(self, call: ToolCall, text: str) -> str:
+        if self.overflow is None:
+            return text
+        return await self.overflow.apply(call, text)

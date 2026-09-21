@@ -27,6 +27,7 @@ Envelope on Kafka and SSE `data`:
 | `run.finished` | `status`, `error?` | update run, clear active_run_id |
 | `error` | `message` | none |
 | `source.added` | `source_id`, `url`, `title?` | none (store + forward) |
+| `context.compacted` | `dropped_messages?`, `kept_messages?`, `tokens_before?` | none (store + forward) |
 
 Agent must emit `message.completed` before `run.finished`, including cancel/fail (partial content).
 Unknown types are stored and forwarded; clients ignore them.

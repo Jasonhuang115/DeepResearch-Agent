@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,6 +32,13 @@ type Config struct {
 	UploadDir           string        `env:"UPLOAD_DIR" envDefault:"data/uploads"`
 	UploadMaxBytes      int64         `env:"UPLOAD_MAX_BYTES" envDefault:"20971520"`
 	UploadMaxFiles      int           `env:"UPLOAD_MAX_FILES" envDefault:"5"`
+	WorkspaceRetention  time.Duration `env:"WORKSPACE_RETENTION" envDefault:"168h"`
+	DurableRoot         string        `env:"DURABLE_ROOT" envDefault:"data/workspaces"`
+	OSSAccessKeyID      string        `env:"OSS_ACCESS_KEY_ID"`
+	OSSAccessKeySecret  string        `env:"OSS_ACCESS_KEY_SECRET"`
+	OSSBucket           string        `env:"OSS_BUCKET"`
+	OSSEndpoint         string        `env:"OSS_ENDPOINT"`
+	OSSPrefix           string        `env:"OSS_PREFIX" envDefault:"tenants/"`
 }
 
 func Load() (Config, error) {
@@ -56,5 +65,28 @@ func Load() (Config, error) {
 	if c.UploadMaxFiles <= 0 {
 		c.UploadMaxFiles = 5
 	}
+	if c.WorkspaceRetention <= 0 {
+		c.WorkspaceRetention = 168 * time.Hour
+	}
+	c.DurableRoot = resolveDurableRoot(c.DurableRoot)
 	return c, nil
+}
+
+func resolveDurableRoot(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		raw = "data/workspaces"
+	}
+	if filepath.IsAbs(raw) {
+		return raw
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return raw
+	}
+	if raw == "data/workspaces" {
+		if _, err := os.Stat(filepath.Join(cwd, "go.mod")); err == nil {
+			return filepath.Clean(filepath.Join(cwd, "..", "data", "workspaces"))
+		}
+	}
+	return filepath.Clean(filepath.Join(cwd, raw))
 }

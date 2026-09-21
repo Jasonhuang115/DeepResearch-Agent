@@ -25,4 +25,5 @@ frontend/.vite/
 # Local data
 var/
 data/uploads/
+data/workspaces/
 *.db

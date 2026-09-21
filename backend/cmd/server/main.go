@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"deepresearch/internal/api"
+	"deepresearch/internal/blob"
 	"deepresearch/internal/cache"
 	"deepresearch/internal/config"
 	"deepresearch/internal/db"
@@ -46,10 +47,11 @@ func main() {
 	producer := mq.NewProducer(cfg.KafkaBrokers)
 	hub := sse.New()
 	r := repo.New(d)
+	store := blob.Open(cfg)
 	auth := &service.Auth{Repo: r, Redis: rdb, Cfg: cfg}
-	conv := &service.Conversations{Repo: r, Redis: rdb, Producer: producer, Cfg: cfg}
+	conv := &service.Conversations{Repo: r, Redis: rdb, Producer: producer, Cfg: cfg, Blob: store}
 	persist := &service.Persist{Repo: r}
-	sweep := &service.Sweeper{Repo: r, Producer: producer, Cfg: cfg}
+	sweep := &service.Sweeper{Repo: r, Producer: producer, Cfg: cfg, Blob: store}
 
 	engine := api.Router(api.Deps{Cfg: cfg, Auth: auth, Conv: conv, Redis: rdb, Hub: hub})
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: engine}

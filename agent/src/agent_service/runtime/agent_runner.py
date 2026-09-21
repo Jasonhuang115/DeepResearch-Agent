@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 from agent_service.config import settings
-from agent_service.context import pack_messages, prepare_messages
+from agent_service.context import ContextPacker, pack_messages
+from agent_service.durable import bind_workspace, build_durable_store
 from agent_service.runtime.system_prompt import build_system_prompt, detect_reply_language
 from agent_service.sources.ingest import ingest_attachments
 from agent_service.sources.ledger import SourceLedger
 from agent_service.tools import ToolRegistry, default_registry
+from agent_service.tools.overflow import Overflow
 from agent_service.tools.web_search import Searcher
 from agent_service.workspace import WorkspaceProvider, default_provider
+from agent_service.workspace.e2b import LOST_NOTICE
 from research_engine.llm.openai_compat import OpenAICompatLLM
 from research_engine.loop import run_loop
 from research_engine.types import EventEmitter, LLMClient
+
+log = logging.getLogger("agent_service.runtime")
 
 MISSING_KEY = "OPENAI_API_KEY is not set"
 
@@ -41,6 +48,7 @@ async def run_research(
     workspace_provider: WorkspaceProvider | None = None,
     searcher: Searcher | None = None,
     fetcher: Any | None = None,
+    durable_store: Any | None = None,
 ) -> None:
     limit = settings.max_turns if max_turns is None else max_turns
     question = ((cmd.get("request") or {}).get("content") or "").strip()
@@ -68,16 +76,54 @@ async def run_research(
     registry = tools
     workspace = None
     ledger = None
+    sandbox_store = None
+    provider = None
     if registry is None:
         provider = workspace_provider or default_provider()
-        workspace = await provider.ensure(str(cmd.get("conversation_id") or ""))
+        workspace = await _ensure_workspace(provider, cmd)
+        sandbox_store = getattr(provider, "store", None)
         if workspace.notice:
             system = f"{system.rstrip()}\n\n<workspace>\n{workspace.notice}\n</workspace>\n"
+        store = durable_store if durable_store is not None else build_durable_store()
+        workspace = await bind_workspace(
+            workspace,
+            tenant_id=str(cmd.get("tenant_id") or ""),
+            conversation_id=str(cmd.get("conversation_id") or ""),
+            store=store,
+            force_hydrate=_needs_hydrate(workspace.notice),
+        )
         ledger = SourceLedger(workspace, seq=seq)
-        registry = default_registry(workspace, ledger=ledger, searcher=searcher, fetcher=fetcher)
+        overflow = Overflow(
+            workspace,
+            run_id=str(cmd.get("run_id") or "run"),
+            max_chars=settings.tool_result_max_chars,
+        )
+        registry = default_registry(
+            workspace,
+            ledger=ledger,
+            searcher=searcher,
+            fetcher=fetcher,
+            overflow=overflow,
+        )
     elif workspace_provider is not None:
-        workspace = await workspace_provider.ensure(str(cmd.get("conversation_id") or ""))
+        provider = workspace_provider
+        workspace = await _ensure_workspace(provider, cmd)
+        sandbox_store = getattr(provider, "store", None)
+        store = durable_store if durable_store is not None else build_durable_store()
+        workspace = await bind_workspace(
+            workspace,
+            tenant_id=str(cmd.get("tenant_id") or ""),
+            conversation_id=str(cmd.get("conversation_id") or ""),
+            store=store,
+            force_hydrate=_needs_hydrate(workspace.notice),
+        )
         ledger = SourceLedger(workspace, seq=seq)
+        if registry.overflow is None:
+            registry.overflow = Overflow(
+                workspace,
+                run_id=str(cmd.get("run_id") or "run"),
+                max_chars=settings.tool_result_max_chars,
+            )
 
     manifest = ""
     model = getattr(llm, "model", None) or settings.openai_model
@@ -85,17 +131,92 @@ async def run_research(
     if workspace is not None and ledger is not None:
         manifest = await ingest_attachments(cmd, workspace, ledger)
 
-    messages = _chat_messages(cmd, system, manifest=manifest)
-    await run_loop(
+    packer = ContextPacker(
         llm=llm,
-        tools=registry,
-        messages=messages,
+        workspace=workspace,
         seq=seq,
-        cancel=cancel,
-        max_turns=limit,
-        max_report_chars=settings.max_report_chars,
-        prepare_messages=prepare_messages,
+        budget=settings.context_input_budget,
     )
+    messages = _chat_messages(cmd, system, manifest=manifest)
+    keep_stop = asyncio.Event()
+    keep_task = _start_keepalive(
+        workspace,
+        store=sandbox_store,
+        conversation_id=str(cmd.get("conversation_id") or ""),
+        stop=keep_stop,
+    )
+    try:
+        await run_loop(
+            llm=llm,
+            tools=registry,
+            messages=messages,
+            seq=seq,
+            cancel=cancel,
+            max_turns=limit,
+            max_report_chars=settings.max_report_chars,
+            prepare_messages=packer,
+        )
+    finally:
+        keep_stop.set()
+        if keep_task is not None:
+            keep_task.cancel()
+            try:
+                await keep_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+async def _ensure_workspace(provider: WorkspaceProvider, cmd: dict) -> Any:
+    cid = str(cmd.get("conversation_id") or "")
+    tenant_id = str(cmd.get("tenant_id") or "")
+    try:
+        return await provider.ensure(cid, tenant_id=tenant_id)  # type: ignore[call-arg]
+    except TypeError:
+        return await provider.ensure(cid)
+
+
+def _needs_hydrate(notice: str | None) -> bool:
+    text = notice or ""
+    return LOST_NOTICE in text
+
+
+def _start_keepalive(
+    workspace: Any,
+    *,
+    store: Any,
+    conversation_id: str,
+    stop: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if workspace is None:
+        return None
+    interval = settings.keepalive_sec
+    if interval <= 0:
+        return None
+    sandbox_id = _sandbox_id(workspace)
+    ttl = settings.sandbox_redis_ttl_sec
+
+    async def _loop() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            try:
+                await workspace.keepalive()
+                if store is not None and sandbox_id and conversation_id:
+                    await store.set(conversation_id, sandbox_id, ttl)
+            except Exception:
+                log.warning("workspace keepalive failed", exc_info=True)
+
+    return asyncio.create_task(_loop(), name=f"keepalive-{conversation_id or 'ws'}")
+
+
+def _sandbox_id(workspace: Any) -> str | None:
+    inner = getattr(workspace, "inner", workspace)
+    client = getattr(inner, "client", None)
+    sid = getattr(client, "sandbox_id", None)
+    return str(sid) if sid else None
 
 
 def _chat_messages(cmd: dict, system: str, *, manifest: str = "") -> list[dict[str, Any]]:

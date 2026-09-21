@@ -1,9 +1,9 @@
 # Agent 系统后续待做的 feature
 
-Date: 2026-09-19
-Status: backlog（第 1–13 节与第 14 节都不在当前问答框架里实现）
+Date: 2026-09-21
+Status: 第 1 节已落地（search/fetch/上传/SSRF）。第 2–3 节（压缩 + 文件记忆 + OSS）在 `feat/context-memory`。其余仍是 backlog。
 
-当前已有：`research_engine` 的 tool-calling loop、OpenAI 兼容 LLM、Markdown 分片 system prompt、Kafka runner。`web_search` 仍是 mock；`Read` / `Write` / `Bash` 只有 schema 和失败桩。下面第 1–13 节是产品能力；第 14 节是本轮框架刻意留下的缺口。标了「待敲定」的不要在实现时擅自定死。
+当前已有：`research_engine` loop、真实 `web_search`/`web_fetch`、来源账本、用户上传进沙箱、Read/Write/Bash（本地或 E2B）。
 
 相关文档：
 
@@ -13,6 +13,8 @@ Status: backlog（第 1–13 节与第 14 节都不在当前问答框架里实�
 ---
 
 ## 1. Web 工具与用户资料
+
+**状态：done**（`feat/search-fetch-uploads`）。生产 Tavily + `web_fetch` + SSRF；上传经 Go multipart 进 `attachments/` 与 ledger。
 
 **问题：** 没有真实检索和抓取，研究只能对着 mock 编；用户也没法把 PDF / 笔记交进沙箱。
 
@@ -48,71 +50,51 @@ Go 仍是上传入口（鉴权、租户、体积限制），agent 只消费已�
 
 ## 2. 上下文压缩
 
-当前明确不做滑窗。下一阶段压缩是三件套，不是「丢掉最老的几轮」就完事。
+**状态：本 PR。** 不做滑窗当唯一策略。不丢弃未过期的工具全文（coding agent 那套不适用）。
 
 ### 2.1 摘要式压缩
 
-窗口接近预算时，把**即将被挤出的老轮次**压成一条结构化摘要，插在 system 附近：
+窗口超过 `AGENT_CONTEXT_INPUT_BUDGET`（默认 100000，启发式 token）时，把即将挤出的老轮次压成一条四章摘要，插在 system 之后（`user` + `<summary>`）。配对安全：`assistant.tool_calls` 与其 `role=tool` 一起丢。摘要可再压。用户默认不可见；透传 `context.compacted`。
 
-- 已确认事实
-- 用过的 `source_id` 列表
-- 未决问题 / 下一步
-- 明确的反证或互相矛盾的来源
+四章：
 
-摘要由一次短 LLM 调用生成，原文不进下一轮 prompt。配对安全：不能留下孤儿 `role=tool`。
+1. **Goal**（短）：和用户对齐后的目标；未声明的约束写「未声明」，禁止扩写。
+2. **Done**（短 checkpoint）：已完成子任务，不写具体数字。
+3. **工具正文**（机器填）：目录，id / 工具 / 标题 / 路径。全文在 OSS/沙箱，本章不贴摘录。
+4. **Continue**：未决（从属于 Goal）、焦点（只一条）、未化解矛盾（只写谁和谁对不上）。
 
-待敲定：触发阈值（token 还是轮次）、摘要是否允许再压缩、是否对用户可见。
+一次无工具 LLM 只填 Goal / Done / Continue。`source_id` 必须已在 ledger。
 
 ### 2.2 Tool result 外置
 
-工具结果超过 `AGENT_TOOL_RESULT_MAX_CHARS` 时：
-
-- 完整正文写入沙箱 `tool-output/{run_id}/{tool_call_id}.txt`（或 `.md`）
-- 回给模型的只有 head + tail + `full_result_path` + 「中间不是空的，去文件里 Grep」
-- 没有沙箱时只截断，**禁止谎称路径存在**
-
-这是压缩的第一层，应先于摘要上线。Fetch 大页、Bash 长 stdout 都走这里。
+超过 `AGENT_TOOL_RESULT_MAX_CHARS`（默认 10000）：全文写 `tool-output/{run_id}/{tool_call_id}.txt`（OSS 真源 + 本沙箱副本），回模型 head + tail + 路径。无沙箱/无 OSS 只截断，禁止谎称路径。`web_search` / `web_fetch` 正文已在 `sources/`，不再抄一份。
 
 ### 2.3 定期过期
 
-外置文件和过期摘要不能无限堆积。
-
-拟定：
-
-- run 内：tool-output 按年龄或「距上次被 Grep 的时间」过期，过期后 ledger 留一条墓碑（id、标题、已删）
-- 会话级：E2B TTL 到了，记忆文件要先抽到对象存储或放弃；重启后 `connect` 失败则重建空沙箱并告诉模型「上一轮工作区丢了」
-- 过期策略与第 3 节长期共识的保留名单要对齐，避免把「已结算的结论」当垃圾扫掉
-
-待敲定：TTL 数字、是否按 source_id 永不删、用户是否能 pin。
+会话闲置 **7 天**（`WORKSPACE_RETENTION`，按 conversation `updated_at`）或会话删除：删整个 OSS 前缀 `tenants/{tenant_id}/conversations/{conversation_id}/`。不按单对象 lifecycle。无 pin。
 
 ---
 
 ## 3. 基于文件系统的记忆管理（Deep Research）
 
-**问题：** 单靠 messages 撑不住超大 tool result 和跨 run 的共识。沙箱目录就是研究工作区，记忆应落在文件上，而不是隐式塞进 prompt。
-
-拟定目录（细节待敲定）：
+**状态：本 PR，与第 2 节同一分支。** 工具正文真源是阿里云 OSS（按租户/会话前缀），本会话沙箱是工作副本。不把正文放 Redis。
 
 ```text
-/home/user/
-  sources/           来源正文 + ledger.json
-  tool-output/       过期前的完整工具输出
-  memory/
-    consensus.md     本会话已结算的判断（可跨 run）
-    open-questions.md
-    notes.md         模型可 Edit 的工作笔记
-  subagents/         见第 4 节
-  report.md          当前 run 终稿草稿
+OSS tenants/{tenant_id}/conversations/{conversation_id}/
+  sources/index.json
+  sources/ledger.json
+  sources/{source_id}.md
+  tool-output/{run_id}/{id}.txt
+
+沙箱（仅本前缀 hydrate）
+  以上路径 + attachments/ + memory/notes.md + memory/findings.md + memory/open-questions.md + report.md
 ```
 
-原则：
-
-- **超大 tool result：** 只活在 `tool-output/`，过期后从磁盘删、从 prompt 消失，ledger 留索引。
-- **长期共识：** 短、可引用、与 `source_id` 挂钩；主 agent 每轮最多 Read 一遍 `consensus.md`，不要把全文复制进 system。
-- **写权限：** 模型可以 Edit `memory/` 和 `notes.md`；不能改 `sources/` 与 ledger（防伪造来源）。
-- **跨 run：** 同一 `conversation_id` 复用沙箱，所以共识自然留下；换沙箱时要定义导出。
-
-待敲定：共识的更新协议（谁写、何时冻结）、是否要向量检索、如何和摘要压缩去重（避免同一事实写三份）。
+- `sources/` 与 `attachments/` 模型只读。
+- `memory/findings.md` / `open-questions.md` 由压缩器写；`notes.md` 与 `report.md` 模型可写。
+- `ensure` 重建空沙箱后只 LIST/GET 这一 OSS 前缀。
+- 检索：先 Read `sources/index.json`，再 Read `sources/{id}.md`。
+- 不做向量检索。
 
 ---
 
@@ -487,18 +469,15 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 
 ## 建议顺序
 
-0. 第 14 节：工作区落地（Read/Write/Bash）→ 真 search/fetch（第 1 节）→ 触顶续写 → `prepare_messages` 滑窗。loop 结构不要重写。
-1. Web search / fetch + 上传进沙箱（没有材料，后面全是空转）
-2. Fetch 安全底线：SSRF 黑名单 + 正文当数据不当指令（上 browser 之前就要有）
-3. Tool result 外置 + 过期
-4. 来源可到达 / 质量标签进 ledger（可信度的最小闭环）
-5. 文件系统记忆（共识只吸收通过质量检查的来源）
-6. 阻塞型 subagent + 落盘报告。**不要先做 Teams。**
-7. Opik trace（开发消耗）；用户轨迹 UI 可并行
-8. Skill 文档；需要时再 MCP（澄清可先当一条 grill skill）
-9. **澄清模式**（禁搜追问 → `brief.md`）再接 Plan + 中途 HITL
-10. 无头渲染 / 白名单 browser（fetch 诚实失败不够用再上）
-11. 意图拆分、Computer use 全量、定时 watch、A2A
+0. 第 14 节工作区 + 第 1 节 search/fetch/上传：**已做**。
+1. **本 PR：** overflow + 四章摘要压缩 + OSS 会话前缀 + 7 天清理
+2. 来源可到达 / 质量标签进 ledger
+3. 阻塞型 subagent + 落盘报告。**不要先做 Teams。**
+4. Opik trace（开发消耗）；用户轨迹 UI 可并行
+5. Skill 文档；需要时再 MCP（澄清可先当一条 grill skill）
+6. **澄清模式**（禁搜追问 → `brief.md`）再接 Plan + 中途 HITL
+7. 无头渲染 / 白名单 browser（fetch 诚实失败不够用再上）
+8. 意图拆分、Computer use 全量、定时 watch、A2A
 
 ---
 
@@ -506,7 +485,7 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 
 **问题：** 问答 loop 已经能跑，但工具没有工作区、长输出不会续写、上下文不会裁。后面接第 1–13 节时，应先补这些缝，而不是改 loop 结构。
 
-挂钩已经在代码里：`default_registry()`、`prepare_messages()`（透传）、`FinishKind.OUTPUT_LIMIT`（现在当截断终稿，不续写）。不要再抽一层空的 Sandbox Protocol，除非同时接上第一种真实工作区。
+挂钩已经在代码里：`default_registry()`、`prepare_messages()`（本 PR 为配对安全摘要压缩）、`FinishKind.OUTPUT_LIMIT`（现在当截断终稿，不续写）。不要再抽一层空的 Sandbox Protocol，除非同时接上第一种真实工作区。
 
 ### 14.1 工作区，让 Read / Write / Bash 真正执行
 
@@ -539,7 +518,7 @@ Go `AGENT_BASE_URL` 反代 `GET /v1/runs/{run_id}/artifacts/{path}`：本轮 Fas
 
 ### 14.4 上下文滑窗
 
-[`prepare_messages`](../agent/src/agent_service/context/__init__.py) 现在是 `list(...)`。摘要式压缩见第 2.1 节（明确不做滑窗当唯一策略）。滑窗可以作为压缩之前的一层：保留 system、从最新往回、配对安全（不丢孤儿 `role=tool`）。启发式 token 即可，不接 tiktoken。
+摘要式压缩见第 2.1 节（本 PR）。启发式 token；配对安全分块；不做滑窗当唯一策略。
 
 ### 14.5 不要在本层再做的
 

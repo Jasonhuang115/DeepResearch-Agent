@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from research_engine.completion import FinishKind, normalize_finish
@@ -23,7 +24,10 @@ async def run_loop(
     cancel: asyncio.Event,
     max_turns: int,
     max_report_chars: int,
-    prepare_messages: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
+    prepare_messages: Callable[
+        [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
+    ]
+    | None = None,
 ) -> None:
     notes: list[str] = []
     openai_tools = tools.openai_tools()
@@ -77,7 +81,9 @@ async def _step(
     turn: int,
     tool_choice: str,
     max_report_chars: int,
-    prepare: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
+    prepare: Callable[
+        [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
+    ],
 ) -> bool:
     streamed: list[str] = []
 
@@ -148,12 +154,16 @@ async def _complete(
     seq: EventEmitter,
     turn: int,
     notes: list[str],
-    prepare: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
+    prepare: Callable[
+        [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
+    ],
     on_delta: Any = None,
     on_reasoning: Any = None,
 ) -> TurnResult | None:
     await seq.emit("run.progress", {"turn": turn, "note": "thinking"})
     window = prepare(messages)
+    if inspect.isawaitable(window):
+        window = await window
 
     async def emit_reasoning(piece: str) -> None:
         await seq.emit("reasoning_delta", {"delta": piece})
@@ -230,6 +240,13 @@ async def _invoke(
         err = str(exc)
         await seq.emit("tool_call.finished", {"tool_call_id": call.id, "ok": False, "summary": err})
         return call, False, err
+
+    after = getattr(tools, "after_result", None)
+    if after is not None:
+        try:
+            text = await after(call, text)
+        except Exception:
+            log.exception("tool overflow failed")
 
     if cancel.is_set():
         await seq.emit("tool_call.finished", {"tool_call_id": call.id, "ok": False, "summary": "cancelled"})

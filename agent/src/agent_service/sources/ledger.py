@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from agent_service.sources.catalog import sync_source_entries
 from agent_service.workspace.protocol import Workspace
 from research_engine.types import EventEmitter
 
@@ -179,6 +180,10 @@ class SourceLedger:
     async def _flush(self) -> None:
         data = await self.load()
         await self.workspace.write_text(LEDGER_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        try:
+            await sync_source_entries(self.workspace, list(data.get("sources") or []))
+        except Exception:
+            pass
 
 
 def _record_from_dict(item: dict[str, Any]) -> SourceRecord:

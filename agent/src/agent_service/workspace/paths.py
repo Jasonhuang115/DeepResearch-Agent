@@ -14,6 +14,8 @@ _EXPLICIT_SECRETS = frozenset(
         "E2B_API_KEY",
         "OPENAI_API_KEY",
         "TAVILY_API_KEY",
+        "OSS_ACCESS_KEY_ID",
+        "OSS_ACCESS_KEY_SECRET",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
     }

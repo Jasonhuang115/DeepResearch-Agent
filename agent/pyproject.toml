@@ -17,6 +17,7 @@ dependencies = [
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 e2b = ["e2b>=1.0"]
 redis = ["redis>=5"]
+oss = ["oss2>=2.18"]
 
 [build-system]
 requires = ["hatchling"]

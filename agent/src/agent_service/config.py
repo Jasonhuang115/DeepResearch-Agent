@@ -33,6 +33,15 @@ class Settings:
     fetch_timeout_sec: int = int(os.getenv("AGENT_FETCH_TIMEOUT_SEC", "20"))
     fetch_max_bytes: int = int(os.getenv("AGENT_FETCH_MAX_BYTES", "2000000"))
     upload_dir: str = os.getenv("UPLOAD_DIR", "data/uploads")
+    tool_result_max_chars: int = int(os.getenv("AGENT_TOOL_RESULT_MAX_CHARS", "10000"))
+    context_input_budget: int = int(os.getenv("AGENT_CONTEXT_INPUT_BUDGET", "100000"))
+    keepalive_sec: int = int(os.getenv("AGENT_KEEPALIVE_SEC", "60"))
+    durable_root: str = os.getenv("AGENT_DURABLE_ROOT", "data/workspaces")
+    oss_access_key_id: str = os.getenv("OSS_ACCESS_KEY_ID", "")
+    oss_access_key_secret: str = os.getenv("OSS_ACCESS_KEY_SECRET", "")
+    oss_bucket: str = os.getenv("OSS_BUCKET", "")
+    oss_endpoint: str = os.getenv("OSS_ENDPOINT", "")
+    oss_prefix: str = os.getenv("OSS_PREFIX", "tenants/")
 
 
 def resolve_upload_dir(raw: str | None = None) -> Path:
@@ -43,6 +52,17 @@ def resolve_upload_dir(raw: str | None = None) -> Path:
     cwd = Path.cwd()
     if value == "data/uploads" and (cwd / "pyproject.toml").exists():
         return (cwd.parent / "data" / "uploads").resolve()
+    return (cwd / path).resolve()
+
+
+def resolve_durable_root(raw: str | None = None) -> Path:
+    value = (raw if raw is not None else settings.durable_root) or "data/workspaces"
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    cwd = Path.cwd()
+    if value == "data/workspaces" and (cwd / "pyproject.toml").exists():
+        return (cwd.parent / "data" / "workspaces").resolve()
     return (cwd / path).resolve()
 
 

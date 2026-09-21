@@ -23,6 +23,8 @@ def test_prompt_fragment_order_and_tags() -> None:
     assert "not evidence" in text
     assert "source_id" in text
     assert "attachments/" in text
+    assert "sources/index.json" in text
+    assert "tool-output/" in text
     assert "**Not implemented.**" not in text
 
 

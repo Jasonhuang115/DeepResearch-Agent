@@ -90,7 +90,10 @@ func (r *Repo) UpdateConversationTitle(ctx context.Context, id int64, title stri
 
 func (r *Repo) SoftDeleteConversation(ctx context.Context, id int64) error {
 	now := time.Now().UTC()
-	return r.scoped(ctx).Model(&model.Conversation{}).Where("id = ?", id).Update("deleted_at", now).Error
+	return r.scoped(ctx).Model(&model.Conversation{}).Where("id = ?", id).Updates(map[string]any{
+		"deleted_at": now,
+		"updated_at": now,
+	}).Error
 }
 
 func (r *Repo) ClaimActiveRun(ctx context.Context, convID, runID int64) (bool, error) {
@@ -254,6 +257,25 @@ func (r *Repo) StaleRuns(ctx context.Context, queuedAfter, runningAfter time.Tim
 func (r *Repo) DeleteOldEvents(ctx context.Context, before time.Time, batch int) (int64, error) {
 	res := r.sys(ctx).Where("created_at < ?", before).Limit(batch).Delete(&model.RunEvent{})
 	return res.RowsAffected, res.Error
+}
+
+type IdleConversation struct {
+	TenantPublic       string `gorm:"column:tenant_public"`
+	ConversationPublic string `gorm:"column:conversation_public"`
+}
+
+func (r *Repo) IdleConversations(ctx context.Context, cutoff time.Time, limit int) ([]IdleConversation, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var out []IdleConversation
+	err := r.sys(ctx).Table("conversations AS c").
+		Select("t.public_id AS tenant_public, c.public_id AS conversation_public").
+		Joins("JOIN tenants t ON t.id = c.tenant_id").
+		Where("c.updated_at < ? AND c.active_run_id IS NULL", cutoff).
+		Limit(limit).
+		Scan(&out).Error
+	return out, err
 }
 
 func isDup(err error) bool {

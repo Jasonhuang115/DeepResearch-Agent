@@ -1,10 +1,21 @@
-"""Context window / memory. Filled in later; v1 is a pass-through."""
+"""Context window packing: pairing-safe compact when over budget."""
 
+from agent_service.context.compact import (
+    ContextPacker,
+    estimate_tokens,
+    pack_messages,
+    plan_compact,
+    prepare_messages,
+    split_pair_blocks,
+    window_tokens,
+)
 
-def pack_messages(messages: list[dict]) -> list[dict]:
-    return list(messages)
-
-
-def prepare_messages(messages: list[dict]) -> list[dict]:
-    """Hook for later compression. Must keep tool-call / tool-result pairs intact."""
-    return list(messages)
+__all__ = [
+    "ContextPacker",
+    "estimate_tokens",
+    "pack_messages",
+    "plan_compact",
+    "prepare_messages",
+    "split_pair_blocks",
+    "window_tokens",
+]

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"deepresearch/internal/blob"
 	"deepresearch/internal/config"
 	"deepresearch/internal/model"
 	"deepresearch/internal/mq"
@@ -15,6 +16,7 @@ type Sweeper struct {
 	Repo     *repo.Repo
 	Producer *mq.Producer
 	Cfg      config.Config
+	Blob     blob.Store
 }
 
 func (s *Sweeper) Run(ctx context.Context) {
@@ -36,16 +38,54 @@ func (s *Sweeper) tick(ctx context.Context) {
 	runs, err := s.Repo.StaleRuns(ctx, now.Add(-s.Cfg.QueuedTimeout), now.Add(-s.Cfg.RunningStale))
 	if err != nil {
 		slog.Warn("sweeper list", "err", err)
-		return
-	}
-	for _, run := range runs {
-		s.fail(ctx, run)
+	} else {
+		for _, run := range runs {
+			s.fail(ctx, run)
+		}
 	}
 	if n, err := s.Repo.DeleteOldEvents(ctx, now.Add(-s.Cfg.JournalRetention), 1000); err != nil {
 		slog.Warn("journal prune", "err", err)
 	} else if n > 0 {
 		slog.Info("journal pruned", "rows", n)
 	}
+	s.gcWorkspaces(ctx, now)
+}
+
+func (s *Sweeper) gcWorkspaces(ctx context.Context, now time.Time) {
+	if s.Blob == nil || s.Repo == nil {
+		return
+	}
+	retention := s.Cfg.WorkspaceRetention
+	if retention <= 0 {
+		retention = 168 * time.Hour
+	}
+	rows, err := s.Repo.IdleConversations(ctx, now.Add(-retention), 200)
+	if err != nil {
+		slog.Warn("workspace gc list", "err", err)
+		return
+	}
+	if n := PruneSessions(ctx, s.Blob, rows); n > 0 {
+		slog.Info("workspace prefixes pruned", "n", n)
+	}
+}
+
+func PruneSessions(ctx context.Context, store blob.Store, rows []repo.IdleConversation) int {
+	if store == nil {
+		return 0
+	}
+	n := 0
+	for _, row := range rows {
+		if row.TenantPublic == "" || row.ConversationPublic == "" {
+			continue
+		}
+		prefix := blob.SessionPrefix(row.TenantPublic, row.ConversationPublic)
+		if err := store.DeletePrefix(ctx, prefix); err != nil {
+			slog.Warn("workspace gc", "prefix", prefix, "err", err)
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func (s *Sweeper) fail(ctx context.Context, run model.Run) {

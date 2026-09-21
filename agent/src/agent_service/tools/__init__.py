@@ -20,6 +20,7 @@ from agent_service.tools.fs import (
     read_file,
     write_file,
 )
+from agent_service.tools.overflow import Overflow
 from agent_service.tools.registry import ToolRegistry, ToolSpec
 from agent_service.tools.web_fetch import DESCRIPTION as FETCH_DESCRIPTION
 from agent_service.tools.web_fetch import PARAMETERS as FETCH_PARAMETERS
@@ -60,10 +61,12 @@ def default_registry(
     ledger: SourceLedger | None = None,
     searcher: Searcher | None = None,
     fetcher: Any | None = None,
+    overflow: Overflow | None = None,
 ) -> ToolRegistry:
     if workspace is not None and ledger is None:
         ledger = SourceLedger(workspace)
     r = ToolRegistry()
+    r.overflow = overflow
     r.register(
         "web_search",
         _bound_web(web_search, workspace, ledger, searcher=searcher),

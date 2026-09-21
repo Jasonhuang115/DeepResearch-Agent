@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"deepresearch/internal/blob"
 	"deepresearch/internal/cache"
 	"deepresearch/internal/config"
 	"deepresearch/internal/httpx"
@@ -23,6 +25,7 @@ type Conversations struct {
 	Redis    *cache.Redis
 	Producer *mq.Producer
 	Cfg      config.Config
+	Blob     blob.Store
 }
 
 func (s *Conversations) List(ctx context.Context, before *time.Time, limit int) (ListOut[ConversationView], error) {
@@ -143,7 +146,25 @@ func (s *Conversations) Delete(ctx context.Context, publicID string) error {
 			_ = s.Cancel(ctx, run.PublicID)
 		}
 	}
-	return s.Repo.SoftDeleteConversation(ctx, c.ID)
+	if err := s.Repo.SoftDeleteConversation(ctx, c.ID); err != nil {
+		return err
+	}
+	s.deleteWorkspacePrefix(ctx, c.PublicID)
+	return nil
+}
+
+func (s *Conversations) deleteWorkspacePrefix(ctx context.Context, conversationPublic string) {
+	if s.Blob == nil {
+		return
+	}
+	p, err := tenant.FromContext(ctx)
+	if err != nil || p.TenantPublic == "" {
+		return
+	}
+	prefix := blob.SessionPrefix(p.TenantPublic, conversationPublic)
+	if err := s.Blob.DeletePrefix(ctx, prefix); err != nil {
+		slog.Warn("delete workspace prefix", "prefix", prefix, "err", err)
+	}
 }
 
 func (s *Conversations) Messages(ctx context.Context, convPublic string, beforeID *int64, limit int) (ListOut[MessageView], error) {

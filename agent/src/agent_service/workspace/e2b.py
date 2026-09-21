@@ -73,14 +73,14 @@ class E2BProvider:
     ttl_sec: int = 3300
     home: str = E2B_HOME
 
-    async def ensure(self, conversation_id: str) -> E2BWorkspace | LocalDirWorkspace:
+    async def ensure(self, conversation_id: str, tenant_id: str | None = None) -> E2BWorkspace | LocalDirWorkspace:
         try:
             return await self._ensure_e2b(conversation_id)
         except Exception:
             log.exception("E2B ensure failed; falling back to local workspace")
             if self.local is None:
                 raise
-            ws = await self.local.ensure(conversation_id)  # type: ignore[union-attr]
+            ws = await self.local.ensure(conversation_id, tenant_id=tenant_id)  # type: ignore[union-attr]
             extra = FALLBACK_NOTICE
             ws.notice = f"{ws.notice}\n{extra}".strip() if ws.notice else extra
             return ws
@@ -91,6 +91,7 @@ class E2BProvider:
         if sandbox_id:
             try:
                 client = await self.factory.connect(sandbox_id)
+                await self.store.set(conversation_id, sandbox_id, self.ttl_sec)
                 return E2BWorkspace(client=client, home=self.home, timeout_sec=self.timeout_sec)
             except Exception:
                 log.info("E2B connect failed for %s; recreating", conversation_id)
@@ -231,6 +232,7 @@ class FakeE2BSandbox:
 
     async def set_timeout(self, timeout_sec: int) -> None:
         self.timeout = timeout_sec
+        self.timeout_calls = getattr(self, "timeout_calls", 0) + 1
 
 
 @dataclass
