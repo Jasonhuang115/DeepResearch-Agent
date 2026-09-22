@@ -9,7 +9,8 @@ import (
 )
 
 type Persist struct {
-	Repo *repo.Repo
+	Repo         *repo.Repo
+	OnRunCleared func(ctx context.Context, conversationID int64)
 }
 
 func (p *Persist) Handle(ctx context.Context, raw []byte) error {
@@ -45,6 +46,9 @@ func (p *Persist) Handle(ctx context.Context, raw []byte) error {
 	if clear {
 		if err := p.Repo.ClearActiveRun(ctx, run.ConversationID, run.ID); err != nil {
 			return err
+		}
+		if p.OnRunCleared != nil {
+			p.OnRunCleared(ctx, run.ConversationID)
 		}
 	}
 	_ = p.Repo.TouchConversation(ctx, run.ConversationID)

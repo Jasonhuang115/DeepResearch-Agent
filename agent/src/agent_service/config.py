@@ -10,6 +10,7 @@ class Settings:
     kafka_brokers: str = os.getenv("KAFKA_BROKERS", "127.0.0.1:9092")
     commands_topic: str = os.getenv("KAFKA_COMMANDS_TOPIC", "research.run.commands")
     events_topic: str = os.getenv("KAFKA_EVENTS_TOPIC", "research.run.events")
+    wakes_topic: str = os.getenv("KAFKA_WAKES_TOPIC", "research.subagent.wakes")
     group: str = os.getenv("KAFKA_GROUP", "agent")
     max_report_chars: int = int(os.getenv("MAX_REPORT_CHARS", "200000"))
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")

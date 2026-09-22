@@ -103,7 +103,7 @@ report.md             当前研究报告草稿（模型可写）
 brief.md              对齐后的研究目标（Grill 未做；有则压缩抄进 Goal）
 ```
 
-`subagents/` 见第 4 节，未做。
+`subagents/` 见第 4 节。异步派发、报告落盘和完成唤醒已做。
 
 权限：`sources/` 与 `attachments/` 模型只读。检索：先 Read `sources/index.json`，再 Read 路径。数字和原文不靠摘要里的改写。
 
@@ -137,60 +137,44 @@ A 的沙箱挂不上 B 的盘：A 的命令里没有 B 的 `(ten_, conv_)`，Age
 
 **问题：** 主 loop 自己搜、自己写会把上下文和 todo 搅成一团。子任务应有独立消息列表，结束只把**落盘报告**交回。
 
-### 4.1 落盘约定
+星型：子 agent 之间不通讯。Teams 不做。
 
-不新开 Kafka run（Go 仍是会话一个 active run）。子 agent 是进程内 nested loop。
+### 4.1 派发
+
+主 agent，以及深度 1 的子 agent，调用 `spawn_subagent(description, max_time, id)`。工具立刻返回，不等报告。`id` 由调用方传入，匹配 `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`，同一会话不可重复。描述写入 `subagents/{id}/spec.md`。
+
+- 每个会话同时在跑的 subagent 最多 21（按父 1、子 10、孙 10 留的上限）。超限时工具返回错误。
+- 深度 2：主 agent 派子（深度 1），子可以派孙（深度 2）。孙没有 `spawn_subagent`。
+- 子 loop **不设 turn 上限**，也不套 `AGENT_MAX_TURNS`。正常结束是模型自己做完。唯一兜底是这次派发参数里的 `max_time`（调用方决定，系统不再另加固定墙钟上限）。到点取消，并留下已经写下的报告。
+- 用户取消当前会话时，同一会话里还在跑的 subagent 一并取消。
+
+### 4.2 落盘
 
 ```text
-subagents/{child_id}/
-  spec.md       主 agent 写下的任务
-  report.md     子 agent 的唯一交付物
-  sources.md    本任务用到的 source_id
-  log.md        可选：失败原因
+subagents/{id}/
+  spec.md       派发时的任务
+  report.md     结论文本，边生成边追加
+  status.json   running | succeeded | failed | timed_out | cancelled
+tool-output/{id}/{tool_call_id}.txt
 ```
 
-主 agent 用 `Grep` / `Read` 读 `report.md`，不把子 loop 的 tool 轨迹灌进主 messages。事件带 `parent_tool_call_id`，前端可画嵌套，Go 仍当透传。
+结论文本是回答通道的 `text_delta`。reasoning 和工具正文不进 `report.md`。`web_search` / `web_fetch` 仍只落在 `sources/`。其余工具结果无论长短都写入 `tool-output/{id}/`。子 loop 的 `text_delta` / `message.completed` 不送进会话，用户聊天里没有子 agent 自己的气泡。
 
-### 4.2 形态
+检测点是 supervisor 里的任务结束，不是让模型去轮询。
 
-| 形态 | 行为 | 适用 |
-|------|------|------|
-| **阻塞串行** | 主 loop 调 `spawn_subagent`，等到 `report.md` 再继续 | 下一步依赖这份结论 |
-| **阻塞并行** | 一次派发 N 个、`asyncio.gather`，全部完成后主 loop 再走 | 互不依赖的子问题（几家路线对比） |
-| **异步非阻塞** | 派发后主 loop 继续；稍后 `await_subagent` 或轮询文件 | 长检索不要卡住主 todo |
-| **串行 pipeline** | A 的 `report.md` 成为 B 的 `spec.md` 输入 | 先普查再深挖 |
+### 4.3 完成后唤醒
 
-约束：
+除了用户取消，进入终态就向 `research.subagent.wakes` 发一条：`conversation_id`、`tenant_id`、`user_id`、`id`、`status`、`report_path`。取消的子任务不发唤醒。
 
-- 子 agent 默认工具集缩小（search/fetch/read/grep），是否给 Bash/Write 待敲定。
-- 子 agent **不** 再派孙子（先一层），避免扇出爆炸。
-- cancel 主 run 必须取消未完成的子 loop。
-- 预算：每子任务 `max_turns`、总扇出上限。
+Go 消费后：
 
-### 4.3 要不要 Agent Teams（子 agent 互通讯）
+- 会话没有 active run：立刻开一轮新的主 run。
+- 已有 active run：把路径攒起来，等这次 run 清掉 active 后**合并成一轮**。
+- 这条 run 不插入用户消息。路径放进该 run 的系统上下文。主 agent 用 Glob / Grep / Read 读取并总结。用户看见的是这次 `message.completed`。
 
-默认形态是 **星型：只和主 agent 说话**。子 agent 之间不直连，协作靠文件：
+Supervisor 挂在 agent Runtime 上，生命周期长过单次主 run，并在仍有 subagent 时继续 keepalive。进程重启后正在跑的子任务不会恢复；磁盘上的报告还在，但不会自动补唤醒。
 
-- A 写完 `report.md`，主 agent 或 pipeline 把它拷进 B 的 `spec.md`
-- 共享只读的 `sources/` 与 `memory/consensus.md`
-- 需要对齐时由主 agent 开一轮「调解」而不是让两个模型互相聊天
-
-**Teams** 是另一种产品：多个子 agent 有邮箱或共享黑板，可以互相提问、反驳、合并，不必每次经过主 loop。
-
-| | 星型（先做） | Teams（后做，待拍板） |
-|---|---|---|
-| 通讯 | 文件交接 + 主 agent | 子 agent 互发消息 / 共享 `team-board.md` |
-| 上下文 | 各自独立 messages | 要防串台：谁看见谁的草稿 |
-| 来源 | 仍进同一 ledger | 必须禁止互相改对方 `sources/` |
-| 适用 | 分头检索再汇总 | 对辩、多角色审稿、需要来回质疑 |
-
-待敲定：
-
-- 要不要 Teams。建议：**第一版不要。** 互通讯会把取消、预算、引用和死锁一起变复杂；星型 + 落盘报告已经覆盖「分头研究再综合」。
-- 若做：通讯介质是文件黑板还是进程内消息队列；是否允许 @ 点名；主 agent 是否仍是唯一能 `message.completed` 的角色。
-- 与第 8 节 A2A 的边界：Teams 是**一次 run 内部**的多角色；A2A 是**进程/产品外部**的别的 agent 来调我们。不要用 A2A 实现内部 Teams。
-
-实现落点：`agent/src/agent_service/subagents/`（现在是空模块）。
+实现落点：`agent/src/agent_service/subagents/`。
 
 ---
 
@@ -430,7 +414,7 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 
 建议：**要，但当独立产品面，不要塞进单次 ReAct。** 金融情景是刚需（监管更新、财报、利率路径）；没有调度，用户只能每天手动点发送，还丢了和上次报告的 diff。
 
-它不是第 4 节异步 subagent：那是一次 run 内。它也不是 SSE 的 15s ping。它是 Go 侧（或独立 worker）的 **日历触发 → 新 run**。
+它不是第 4 节异步 subagent：那是一次研究会话里的后台任务，完成时唤醒主 agent。它也不是 SSE 的 15s ping。它是 Go 侧（或独立 worker）的 **日历触发 → 新 run**。
 
 ### 12.2 拟定形态
 
@@ -507,7 +491,7 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 0. 第 14 节工作区 + 第 1 节 search/fetch/上传 + 第 2–3 节压缩/OSS 记忆：**已做**。
 1. 绑定加固（第 3.3 节）：Redis/本地路径带 tenant，禁止空 tenant → `default`
 2. 来源可到达 / 质量标签进 ledger
-3. 阻塞型 subagent + 落盘报告。**不要先做 Teams。**
+3. 异步 subagent + 落盘报告 + 完成唤醒：**已做。** 不要做 Teams。
 4. Opik trace（开发消耗）；用户轨迹 UI 可并行
 5. Skill 文档；需要时再 MCP（澄清可先当一条 grill skill）
 6. **澄清模式**（禁搜追问 → `brief.md`）再接 Plan + 中途 HITL

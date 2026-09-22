@@ -22,7 +22,7 @@ async def run_loop(
     messages: list[dict[str, Any]],
     seq: EventEmitter,
     cancel: asyncio.Event,
-    max_turns: int,
+    max_turns: int | None,
     max_report_chars: int,
     prepare_messages: Callable[
         [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
@@ -34,7 +34,11 @@ async def run_loop(
     prepare = prepare_messages or (lambda m: m)
 
     try:
-        for turn in range(1, max_turns + 1):
+        turn = 0
+        while True:
+            turn += 1
+            if max_turns is not None and turn > max_turns:
+                break
             if cancel.is_set():
                 await _finish(seq, "cancelled", _partial(notes), "cancelled")
                 return
@@ -54,6 +58,8 @@ async def run_loop(
             if done:
                 return
 
+        if max_turns is None:
+            return
         if cancel.is_set():
             await _finish(seq, "cancelled", _partial(notes), "cancelled")
             return

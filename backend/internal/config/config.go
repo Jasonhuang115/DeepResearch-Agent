@@ -18,6 +18,7 @@ type Config struct {
 	KafkaBrokers        []string      `env:"KAFKA_BROKERS" envSeparator:"," envDefault:"127.0.0.1:9092"`
 	CommandsTopic       string        `env:"KAFKA_COMMANDS_TOPIC" envDefault:"research.run.commands"`
 	EventsTopic         string        `env:"KAFKA_EVENTS_TOPIC" envDefault:"research.run.events"`
+	WakesTopic          string        `env:"KAFKA_WAKES_TOPIC" envDefault:"research.subagent.wakes"`
 	JWTSecret           string        `env:"JWT_SECRET" envDefault:"dev-change-me-please-use-32-bytes-min"`
 	InstanceID          string        `env:"INSTANCE_ID" envDefault:"local-1"`
 	CORSOrigins         []string      `env:"CORS_ORIGINS" envSeparator:"," envDefault:"http://localhost:5173"`

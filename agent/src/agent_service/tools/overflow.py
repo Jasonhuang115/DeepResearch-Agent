@@ -16,12 +16,14 @@ class Overflow:
     workspace: Workspace | None
     run_id: str
     max_chars: int = 10000
+    always_store: bool = False
 
     async def apply(self, call: ToolCall, text: str) -> str:
         if call.name in SKIP_SPILL:
             return text
         body = text or ""
-        if len(body) <= self.max_chars:
+        short = len(body) <= self.max_chars
+        if short and not self.always_store:
             return body
         path = f"tool-output/{self.run_id}/{call.id}.txt"
         stored = False
@@ -31,7 +33,7 @@ class Overflow:
                 stored = True
             except Exception:
                 stored = False
-            if stored:
+            if stored and not short:
                 try:
                     await upsert_entry(
                         self.workspace,
@@ -40,6 +42,10 @@ class Overflow:
                 except Exception:
                     pass
                 return _head_tail(body, path)
+            if stored:
+                return body
+        if short:
+            return body
         return _truncate_only(body, self.max_chars)
 
 

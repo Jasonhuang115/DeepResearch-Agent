@@ -10,6 +10,8 @@ from agent_service.durable import bind_workspace, build_durable_store
 from agent_service.runtime.system_prompt import build_system_prompt, detect_reply_language
 from agent_service.sources.ingest import ingest_attachments
 from agent_service.sources.ledger import SourceLedger
+from agent_service.subagents.supervisor import SPAWN_DESCRIPTION, SPAWN_PARAMETERS, Supervisor
+from agent_service.subagents.wake import wake_reports_block, wake_user_cue
 from agent_service.tools import ToolRegistry, default_registry
 from agent_service.tools.overflow import Overflow
 from agent_service.tools.web_search import Searcher
@@ -22,6 +24,15 @@ from research_engine.types import EventEmitter, LLMClient
 log = logging.getLogger("agent_service.runtime")
 
 MISSING_KEY = "OPENAI_API_KEY is not set"
+
+
+def build_subagent_llm() -> OpenAICompatLLM:
+    return OpenAICompatLLM(
+        api_key=settings.openai_api_key,
+        model=settings.openai_model,
+        base_url=settings.openai_base_url or None,
+        extra_body=_llm_extra_body(),
+    )
 
 
 def _llm_extra_body() -> dict[str, Any] | None:
@@ -49,15 +60,20 @@ async def run_research(
     searcher: Searcher | None = None,
     fetcher: Any | None = None,
     durable_store: Any | None = None,
+    supervisor: Supervisor | None = None,
 ) -> None:
     limit = settings.max_turns if max_turns is None else max_turns
     question = ((cmd.get("request") or {}).get("content") or "").strip()
+    reply_language = detect_reply_language(question or _last_user_text(cmd))
     system = build_system_prompt(
         conversation_id=str(cmd.get("conversation_id") or ""),
         run_id=str(cmd.get("run_id") or ""),
-        reply_language=detect_reply_language(question),
+        reply_language=reply_language,
         extra={"web_search_provider": settings.web_search_provider},
     )
+    reports = wake_reports_block(cmd.get("wake"))
+    if reports:
+        system = f"{system.rstrip()}\n\n<subagent-reports>\n{reports}\n</subagent-reports>\n"
 
     if llm is None:
         if not settings.openai_api_key:
@@ -125,6 +141,24 @@ async def run_research(
                 max_chars=settings.tool_result_max_chars,
             )
 
+    if supervisor is not None and workspace is not None and registry is not None:
+        supervisor.note_session(
+            conversation_id=str(cmd.get("conversation_id") or ""),
+            tenant_id=str(cmd.get("tenant_id") or ""),
+            user_id=str(cmd.get("user_id") or ""),
+            workspace=workspace,
+            ledger=ledger,
+            searcher=searcher,
+            fetcher=fetcher,
+            store=sandbox_store,
+        )
+        registry.register(
+            "spawn_subagent",
+            supervisor.spawn_tool(str(cmd.get("conversation_id") or ""), 0),
+            description=SPAWN_DESCRIPTION,
+            parameters=SPAWN_PARAMETERS,
+        )
+
     manifest = ""
     model = getattr(llm, "model", None) or settings.openai_model
     await seq.emit("run.started", {"model": model})
@@ -137,7 +171,12 @@ async def run_research(
         seq=seq,
         budget=settings.context_input_budget,
     )
-    messages = _chat_messages(cmd, system, manifest=manifest)
+    messages = _chat_messages(
+        cmd,
+        system,
+        manifest=manifest,
+        wake_cue=wake_user_cue(reply_language) if reports else "",
+    )
     keep_stop = asyncio.Event()
     keep_task = _start_keepalive(
         workspace,
@@ -219,7 +258,20 @@ def _sandbox_id(workspace: Any) -> str | None:
     return str(sid) if sid else None
 
 
-def _chat_messages(cmd: dict, system: str, *, manifest: str = "") -> list[dict[str, Any]]:
+def _last_user_text(cmd: dict) -> str:
+    for item in reversed(cmd.get("messages") or []):
+        if (item.get("role") or "") == "user" and (item.get("content") or "").strip():
+            return str(item.get("content") or "")
+    return ""
+
+
+def _chat_messages(
+    cmd: dict,
+    system: str,
+    *,
+    manifest: str = "",
+    wake_cue: str = "",
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = [{"role": "system", "content": system}]
     for item in pack_messages(cmd.get("messages") or []):
         role = item.get("role") or "user"
@@ -239,4 +291,6 @@ def _chat_messages(cmd: dict, system: str, *, manifest: str = "") -> list[dict[s
             last["content"] = user_body
         elif last is None or last.get("role") != "user" or last.get("content") != user_body:
             out.append({"role": "user", "content": user_body})
+    if wake_cue:
+        out.append({"role": "user", "content": wake_cue})
     return out

@@ -50,7 +50,8 @@ func main() {
 	store := blob.Open(cfg)
 	auth := &service.Auth{Repo: r, Redis: rdb, Cfg: cfg}
 	conv := &service.Conversations{Repo: r, Redis: rdb, Producer: producer, Cfg: cfg, Blob: store}
-	persist := &service.Persist{Repo: r}
+	wakes := service.NewSubagentWakes(r, producer, cfg)
+	persist := &service.Persist{Repo: r, OnRunCleared: wakes.OnRunCleared}
 	sweep := &service.Sweeper{Repo: r, Producer: producer, Cfg: cfg, Blob: store}
 
 	engine := api.Router(api.Deps{Cfg: cfg, Auth: auth, Conv: conv, Redis: rdb, Hub: hub})
@@ -59,6 +60,9 @@ func main() {
 	root, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	go mq.RunLoop(root, mq.NewConsumer(mq.ConsumeOpts{
+		Brokers: cfg.KafkaBrokers, Topic: cfg.WakesTopic, GroupID: "go-subagent-wakes",
+	}), "subagent-wakes", wakes.Handle)
 	go mq.RunLoop(root, mq.NewConsumer(mq.ConsumeOpts{
 		Brokers: cfg.KafkaBrokers, Topic: cfg.EventsTopic, GroupID: "go-persist",
 	}), "persist", func(ctx context.Context, b []byte) error {

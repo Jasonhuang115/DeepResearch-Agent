@@ -105,7 +105,7 @@ export function WorkspacePage() {
     queryKey: ['conversation', conversationId],
     queryFn: () => api<Conversation>(`/v1/conversations/${conversationId}`),
     enabled: !!conversationId,
-    refetchInterval: (q) => (q.state.data?.active_run ? 2000 : false),
+    refetchInterval: 2000,
   })
 
   const messages = useQuery({
@@ -135,11 +135,12 @@ export function WorkspacePage() {
 
   useEffect(() => {
     if (liveDone) {
+      setLocalRun((cur) => (cur && runId && cur.id === runId ? null : cur))
       void qc.invalidateQueries({ queryKey: ['messages', conversationId] })
       void qc.invalidateQueries({ queryKey: ['conversation', conversationId] })
       void qc.invalidateQueries({ queryKey: ['conversations'] })
     }
-  }, [liveDone, conversationId, qc])
+  }, [liveDone, conversationId, qc, runId])
 
   const send = useMutation({
     mutationFn: async (input: { content: string; files: File[] }) => {

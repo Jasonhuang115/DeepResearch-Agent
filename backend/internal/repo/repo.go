@@ -56,6 +56,24 @@ func (r *Repo) TenantByID(ctx context.Context, id int64) (*model.Tenant, error) 
 	return &t, err
 }
 
+func (r *Repo) ConversationByPublicSystem(ctx context.Context, publicID string) (*model.Conversation, error) {
+	var c model.Conversation
+	err := r.sys(ctx).Where("public_id = ? AND deleted_at IS NULL", publicID).First(&c).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &c, err
+}
+
+func (r *Repo) ConversationByIDSystem(ctx context.Context, id int64) (*model.Conversation, error) {
+	var c model.Conversation
+	err := r.sys(ctx).Where("id = ? AND deleted_at IS NULL", id).First(&c).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &c, err
+}
+
 func (r *Repo) ConversationByPublic(ctx context.Context, publicID string) (*model.Conversation, error) {
 	var c model.Conversation
 	err := r.scoped(ctx).Where("public_id = ? AND deleted_at IS NULL", publicID).First(&c).Error
@@ -96,6 +114,13 @@ func (r *Repo) SoftDeleteConversation(ctx context.Context, id int64) error {
 	}).Error
 }
 
+func (r *Repo) ClaimActiveRunSystem(ctx context.Context, convID, runID int64) (bool, error) {
+	res := r.sys(ctx).Model(&model.Conversation{}).
+		Where("id = ? AND active_run_id IS NULL AND deleted_at IS NULL", convID).
+		Update("active_run_id", runID)
+	return res.RowsAffected == 1, res.Error
+}
+
 func (r *Repo) ClaimActiveRun(ctx context.Context, convID, runID int64) (bool, error) {
 	p := tenant.MustFrom(ctx)
 	res := r.DB.System(ctx).Model(&model.Conversation{}).
@@ -112,6 +137,10 @@ func (r *Repo) ClearActiveRun(ctx context.Context, convID, runID int64) error {
 
 func (r *Repo) TouchConversation(ctx context.Context, id int64) error {
 	return r.sys(ctx).Model(&model.Conversation{}).Where("id = ?", id).Update("updated_at", time.Now().UTC()).Error
+}
+
+func (r *Repo) CreateRunSystem(ctx context.Context, run *model.Run) error {
+	return r.sys(ctx).Create(run).Error
 }
 
 func (r *Repo) CreateRun(ctx context.Context, run *model.Run) error {

@@ -11,8 +11,29 @@ type Command struct {
 	UserID         string    `json:"user_id,omitempty"`
 	Request        *Request  `json:"request,omitempty"`
 	Messages       []Msg     `json:"messages,omitempty"`
+	Wake           *Wake     `json:"wake,omitempty"`
 	Reason         string    `json:"reason,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+type Wake struct {
+	Reports []WakeReport `json:"reports"`
+}
+
+type WakeReport struct {
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	ReportPath string `json:"report_path"`
+}
+
+type SubagentWake struct {
+	V              int    `json:"v"`
+	ConversationID string `json:"conversation_id"`
+	TenantID       string `json:"tenant_id"`
+	UserID         string `json:"user_id"`
+	ID             string `json:"id"`
+	Status         string `json:"status"`
+	ReportPath     string `json:"report_path"`
 }
 
 type Request struct {

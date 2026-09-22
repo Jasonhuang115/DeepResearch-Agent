@@ -41,6 +41,15 @@ async def test_overflow_without_workspace_does_not_invent_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_overflow_always_store_keeps_short_body(tmp_path: Path) -> None:
+    ws = await LocalProvider(tmp_path).ensure("conv")
+    overflow = Overflow(ws, run_id="child", max_chars=100, always_store=True)
+    out = await overflow.apply(_call("Read", "c3"), "SHORT_BODY")
+    assert out == "SHORT_BODY"
+    assert await ws.read_text("tool-output/child/c3.txt") == "SHORT_BODY"
+
+
+@pytest.mark.asyncio
 async def test_overflow_skips_web_tools(tmp_path: Path) -> None:
     ws = await LocalProvider(tmp_path).ensure("conv")
     overflow = Overflow(ws, run_id="run_1", max_chars=10)
