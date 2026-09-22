@@ -264,6 +264,7 @@ async def _execute(
             cancel=cancel,
             max_turns=limit,
             max_report_chars=settings.max_report_chars,
+            max_output_continuations=settings.max_output_continuations,
             prepare_messages=packer,
             tracer=tracer,
         )

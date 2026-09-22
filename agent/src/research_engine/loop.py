@@ -9,6 +9,14 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from research_engine.completion import FinishKind, normalize_finish
+from research_engine.continuation import (
+    CONTINUATION_PROMPT,
+    MAX_TRUNCATED_TOOL_CALL_REGENERATIONS,
+    ContinuationDeltas,
+    LiveDeltas,
+    boundary_overlap,
+    visible_text,
+)
 from research_engine.trace import NullTracer, result_overflowed, tool_input, usage_dict
 from research_engine.types import EventEmitter, LLMClient, ToolBox, ToolCall, TurnResult
 
@@ -26,6 +34,7 @@ async def run_loop(
     cancel: asyncio.Event,
     max_turns: int | None,
     max_report_chars: int,
+    max_output_continuations: int = 2,
     prepare_messages: Callable[
         [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
     ]
@@ -57,6 +66,7 @@ async def run_loop(
                 turn=turn,
                 tool_choice="auto",
                 max_report_chars=max_report_chars,
+                max_output_continuations=max_output_continuations,
                 prepare=prepare,
                 tracer=trace,
             )
@@ -70,21 +80,30 @@ async def run_loop(
             return
         trace.add_turn()
         with trace.span("turn", turn=max_turns + 1):
-            result = await _complete(
+            logical = await _logical_assistant(
                 llm,
-                messages,
                 openai_tools,
-                "none",
-                cancel,
+                messages,
                 seq,
-                max_turns + 1,
+                cancel,
                 notes,
-                prepare,
+                turn=max_turns + 1,
+                tool_choice="none",
+                max_output_continuations=max_output_continuations,
+                prepare=prepare,
                 tracer=trace,
             )
-        if result is None:
+        if logical is None:
             return
-        await _handle_final(seq, result, cancel, notes, max_report_chars, streamed=False)
+        await _handle_final(
+            seq,
+            logical.result,
+            cancel,
+            notes,
+            max_report_chars,
+            streamed=logical.streamed,
+            streamed_text=logical.result.content,
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception("run failed")
         await seq.emit("error", {"message": str(exc)})
@@ -103,6 +122,7 @@ async def _step(
     turn: int,
     tool_choice: str,
     max_report_chars: int,
+    max_output_continuations: int,
     prepare: Callable[
         [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
     ],
@@ -121,6 +141,7 @@ async def _step(
             turn=turn,
             tool_choice=tool_choice,
             max_report_chars=max_report_chars,
+            max_output_continuations=max_output_continuations,
             prepare=prepare,
             tracer=tracer,
         )
@@ -138,58 +159,38 @@ async def _step_body(
     turn: int,
     tool_choice: str,
     max_report_chars: int,
+    max_output_continuations: int,
     prepare: Callable[
         [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
     ],
     tracer: Any,
 ) -> bool:
-    streamed: list[str] = []
-
-    async def on_delta(piece: str) -> None:
-        streamed.append(piece)
-        await seq.emit("text_delta", {"delta": piece})
-
     async def on_reasoning(piece: str) -> None:
         await seq.emit("reasoning_delta", {"delta": piece})
 
-    result = await _complete(
+    logical = await _logical_assistant(
         llm,
-        messages,
         openai_tools,
-        tool_choice,
-        cancel,
+        messages,
         seq,
-        turn,
+        cancel,
         notes,
-        prepare,
-        on_delta=on_delta,
-        on_reasoning=on_reasoning,
+        turn=turn,
+        tool_choice=tool_choice,
+        max_output_continuations=max_output_continuations,
+        prepare=prepare,
         tracer=tracer,
+        on_reasoning=on_reasoning,
     )
-    if result is None:
+    if logical is None:
         return True
-
-    info = normalize_finish(
-        result.finish_reason,
-        has_tool_calls=bool(result.tool_calls),
-        cancelled=cancel.is_set(),
-    )
-    if info.kind == FinishKind.CANCELLED or cancel.is_set():
-        await _finish(seq, "cancelled", _partial(notes) or "".join(streamed), "cancelled")
-        return True
-    if info.kind in (FinishKind.FILTERED, FinishKind.ERROR, FinishKind.UNKNOWN):
-        msg = info.provider_reason or info.kind.value
-        await seq.emit("error", {"message": msg})
-        await _finish(seq, "failed", _partial(notes) or "".join(streamed), msg)
-        return True
+    result = logical.result
     if result.tool_calls:
-        if streamed:
-            # live path already sent answer tokens; keep a reasoning copy for tool turns
-            pass
-        if result.content:
+        if result.content and not logical.streamed:
             notes.append(result.content)
-            if not streamed:
-                await _delta(seq, "reasoning_delta", result.content)
+            await _delta(seq, "reasoning_delta", result.content)
+        elif result.content:
+            notes.append(result.content)
         cancelled = await _run_tools(tools, result, messages, seq, cancel, notes, tracer)
         return cancelled
     await _handle_final(
@@ -198,10 +199,161 @@ async def _step_body(
         cancel,
         notes,
         max_report_chars,
-        streamed=bool(streamed),
-        streamed_text="".join(streamed),
+        streamed=logical.streamed,
+        streamed_text=result.content,
     )
     return True
+
+
+class _Logical:
+    def __init__(self, result: TurnResult, streamed: bool) -> None:
+        self.result = result
+        self.streamed = streamed
+
+
+async def _logical_assistant(
+    llm: LLMClient,
+    openai_tools: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    seq: EventEmitter,
+    cancel: asyncio.Event,
+    notes: list[str],
+    *,
+    turn: int,
+    tool_choice: str,
+    max_output_continuations: int,
+    prepare: Callable[
+        [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
+    ],
+    tracer: Any,
+    on_reasoning: Any = None,
+) -> _Logical | None:
+    """One logical assistant message. Output-limit text continues in place."""
+    committed = ""
+    continuation_count = 0
+    tool_regens = 0
+    temporary: list[dict[str, Any]] | None = None
+    choice = tool_choice
+    continuation_from: str | None = None
+    streamed = False
+
+    while True:
+        sink: LiveDeltas | ContinuationDeltas
+        if continuation_from is None:
+            sink = LiveDeltas(seq)
+        else:
+            sink = ContinuationDeltas(seq, continuation_from)
+        call_messages = messages if not temporary else [*messages, *temporary]
+        result = await _complete(
+            llm,
+            call_messages,
+            openai_tools,
+            choice,
+            cancel,
+            seq,
+            turn,
+            prepare,
+            on_delta=sink.emit,
+            on_reasoning=on_reasoning,
+            tracer=tracer,
+        )
+        overlap = await sink.finish()
+        visible = _segment_visible(result.content or "", overlap, continuation_from, sink.saw_input)
+        if choice == "none" and result.tool_calls:
+            result = TurnResult(
+                content=visible,
+                finish_reason=result.finish_reason,
+                usage=result.usage,
+            )
+        if visible and not sink.saw_input and not result.tool_calls:
+            streamed = True
+            await seq.emit("text_delta", {"delta": visible})
+        else:
+            streamed = streamed or sink.emitted
+        if cancel.is_set() or _kind(result, cancel) == FinishKind.CANCELLED:
+            await _finish(seq, "cancelled", committed + visible or _partial(notes), "cancelled")
+            return None
+
+        kind = _kind(result, cancel)
+        if kind in (FinishKind.FILTERED, FinishKind.ERROR, FinishKind.UNKNOWN):
+            msg = result.finish_reason or kind.value
+            await seq.emit("error", {"message": msg})
+            await _finish(seq, "failed", committed + visible or _partial(notes), msg)
+            return None
+
+        if kind == FinishKind.OUTPUT_LIMIT and result.tool_calls:
+            if tool_regens >= MAX_TRUNCATED_TOOL_CALL_REGENERATIONS:
+                await seq.emit("error", {"message": "truncated_tool_call"})
+                await _finish(
+                    seq,
+                    "failed",
+                    committed + visible or _partial(notes),
+                    "truncated_tool_call",
+                )
+                return None
+            tool_regens += 1
+            log.warning(
+                "discarding output-limited tool call and regenerating (%d/%d)",
+                tool_regens,
+                MAX_TRUNCATED_TOOL_CALL_REGENERATIONS,
+            )
+            streamed = False
+            continue
+
+        if kind == FinishKind.OUTPUT_LIMIT:
+            if continuation_count >= max_output_continuations:
+                return _Logical(_joined(committed, visible, result), streamed)
+            committed += visible
+            continuation_count += 1
+            payload: dict[str, Any] = {
+                "attempt": continuation_count,
+                "max_attempts": max_output_continuations,
+            }
+            if result.finish_reason:
+                payload["provider_reason"] = result.finish_reason
+            await seq.emit("output_continuation", payload)
+            temporary = [
+                {"role": "assistant", "content": committed},
+                {"role": "user", "content": CONTINUATION_PROMPT},
+            ]
+            choice = "none"
+            continuation_from = committed
+            continue
+
+        if result.tool_calls:
+            return _Logical(
+                TurnResult(
+                    content=visible,
+                    tool_calls=result.tool_calls,
+                    finish_reason=result.finish_reason,
+                    usage=result.usage,
+                ),
+                streamed,
+            )
+        return _Logical(_joined(committed, visible, result), streamed)
+
+
+def _kind(result: TurnResult, cancel: asyncio.Event) -> FinishKind:
+    return normalize_finish(
+        result.finish_reason,
+        has_tool_calls=bool(result.tool_calls),
+        cancelled=cancel.is_set(),
+    ).kind
+
+
+def _segment_visible(content: str, overlap: int, continuation_from: str | None, saw_input: bool) -> str:
+    if saw_input or continuation_from is None:
+        return visible_text(content, overlap)
+    extra = boundary_overlap(continuation_from, content)
+    return visible_text(content, extra)
+
+
+def _joined(committed: str, visible: str, result: TurnResult) -> TurnResult:
+    return TurnResult(
+        content=committed + visible,
+        finish_reason=result.finish_reason,
+        usage=result.usage,
+    )
 
 
 async def _complete(
@@ -212,14 +364,13 @@ async def _complete(
     cancel: asyncio.Event,
     seq: EventEmitter,
     turn: int,
-    notes: list[str],
     prepare: Callable[
         [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
     ],
     on_delta: Any = None,
     on_reasoning: Any = None,
     tracer: Any | None = None,
-) -> TurnResult | None:
+) -> TurnResult:
     await seq.emit("run.progress", {"turn": turn, "note": "thinking"})
     window = prepare(messages)
     if inspect.isawaitable(window):
@@ -250,9 +401,6 @@ async def _complete(
             tool_names=[call.name for call in result.tool_calls],
             usage=usage,
         )
-    if cancel.is_set():
-        await _finish(seq, "cancelled", _partial(notes), "cancelled")
-        return None
     return result
 
 

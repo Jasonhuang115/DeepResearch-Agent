@@ -401,6 +401,7 @@ class Supervisor:
             cancel=job.cancel,
             max_turns=None,
             max_report_chars=settings.max_report_chars,
+            max_output_continuations=settings.max_output_continuations,
             tracer=tracer,
         )
 

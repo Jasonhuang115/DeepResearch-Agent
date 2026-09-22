@@ -19,6 +19,7 @@ class Settings:
     openai_thinking: str = os.getenv("OPENAI_THINKING", "")
     openai_reasoning_effort: str = os.getenv("OPENAI_REASONING_EFFORT", "")
     max_turns: int = int(os.getenv("AGENT_MAX_TURNS", "8"))
+    max_output_continuations: int = int(os.getenv("AGENT_MAX_OUTPUT_CONTINUATIONS", "2"))
     workspace_mode: str = os.getenv("AGENT_WORKSPACE", "auto")
     workspace_root: str = os.getenv(
         "AGENT_WORKSPACE_ROOT",

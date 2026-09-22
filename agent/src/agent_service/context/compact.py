@@ -8,6 +8,7 @@ from typing import Any
 
 from agent_service.sources.catalog import IndexEntry, load_index, render_catalog_chapter
 from agent_service.workspace.protocol import Workspace
+from research_engine.continuation import CONTINUATION_PROMPT
 from research_engine.trace import NullTracer, usage_dict
 from research_engine.types import EventEmitter, LLMClient, TurnResult
 
@@ -97,6 +98,17 @@ def split_pair_blocks(messages: list[dict[str, Any]]) -> tuple[list[dict[str, An
                 group.append(messages[i])
                 i += 1
             blocks.append(group)
+            continue
+        nxt = messages[i + 1] if i + 1 < len(messages) else None
+        if (
+            msg.get("role") == "assistant"
+            and not msg.get("tool_calls")
+            and nxt is not None
+            and nxt.get("role") == "user"
+            and nxt.get("content") == CONTINUATION_PROMPT
+        ):
+            blocks.append([msg, nxt])
+            i += 2
             continue
         if msg.get("role") == "tool":
             if blocks and blocks[-1] and blocks[-1][0].get("role") == "assistant" and blocks[-1][0].get("tool_calls"):

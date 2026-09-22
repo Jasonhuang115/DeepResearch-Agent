@@ -1,9 +1,9 @@
 # Agent 系统后续待做的 feature
 
-Date: 2026-09-21
-Status: 第 1–3 节已落地（search/fetch/上传、四章压缩、OSS 文件记忆）。其余仍是 backlog。绑定加固（Redis/本地路径带 tenant、禁止 `tenants/default/`）见第 3.3 节。
+Date: 2026-09-22
+Status: 第 1–4 节和第 11.1 节已落地（search/fetch/上传、四章压缩、OSS 文件记忆、异步 subagent、Opik 开发 trace）。第 14.1–14.4 已做。其余仍是 backlog。绑定加固（Redis/本地路径带 tenant、禁止 `tenants/default/`）见第 3.3 节。
 
-当前已有：`research_engine` loop、真实 `web_search`/`web_fetch`、来源账本、用户上传、Read/Write/Bash（本地或 E2B）、overflow、会话 OSS 前缀、沙箱 hydrate、7 天前缀 GC。
+当前已有：`research_engine` loop、真实 `web_search`/`web_fetch`、来源账本、用户上传、Read/Write/Bash（本地或 E2B）、overflow、会话 OSS 前缀、沙箱 hydrate、7 天前缀 GC、开发用 Opik trace（有 key 才上报；没有 key 或上报失败都不挡 run）。
 
 相关文档：
 
@@ -134,6 +134,8 @@ A 的沙箱挂不上 B 的盘：A 的命令里没有 B 的 `(ten_, conv_)`，Age
 ---
 
 ## 4. Subagent 系统（文件系统）
+
+**状态：done**（异步派发、落盘报告、完成唤醒）。
 
 **问题：** 主 loop 自己搜、自己写会把上下文和 todo 搅成一团。子任务应有独立消息列表，结束只把**落盘报告**交回。
 
@@ -367,22 +369,30 @@ Web + Bash + 以后的 browser，攻击面主要是「模型把不可信网页�
 
 ## 11. 可观测性与报告可信度
 
-分两套观众，不要混成一个 UI。
+分两套观众，不要混成一个 UI。**11.1 已做**；11.2 仍是 backlog。
 
 ### 11.1 给开发：Opik trace
 
-用 Opik（或等价：Langfuse / Phoenix，这里定 Opik，与 Discovery 一致）记 **开发定位和消耗**，用户默认看不见。
+**状态：done**（`feat/opik-trace`）。用 Opik 记开发定位和消耗，用户默认看不见。不用 OpenAI 自动包装，也不用 `@opik.track`（两者会把完整 messages 打上云）。`research_engine` 只依赖空 tracer；真正客户端在 [`tracing.py`](../agent/src/agent_service/observability/tracing.py)。没有 key、或上报抛错，都 no-op，不挡 run。pytest 强制 no-op。
 
-建议 span：
+树：
 
-- `run` → `turn` → `llm`（模型、prompt tokens、completion tokens、续写次数、finish_reason）
-- `tool.{name}`（延迟、ok、结果字符数、是否 overflow）
-- `subagent.{id}`（墙钟、子 turns）
-- `compress` / `fetch` / `browser`（若有）
+- `run` → `turn` → `llm` / `tool.{name}`；`compress` 挂在同一条 `run` 上。
+- 子 agent 是单独的 `subagent.{id}` trace。`thread_id` 用 `conversation_id`，metadata 带 `parent_run_id`。不挂在已经结束的 tool span 下。
 
-消耗：按 run、按租户聚合 token 与搜索次数；超预算在 trace 里打标，并驱动 run `incomplete`。采样：开发全量，生产可按租户采样。PII：抓取正文进 trace 要截断或哈希，避免把用户 PDF 打到 Opik 云。
+字段：
 
-Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
+- **llm：** model、`finish_reason`、usage、消息条数、输出字符数、tool 名。不记 prompt、reasoning、tool 参数。
+- **tool.{name}：** ok、耗时、返回字符数、是否 overflow。`web_search` 只记截断后的 query，`web_fetch` 只记 url；Read / Write / Bash 只记截断后的 path 或 command。不记抓取正文和文件内容。
+- **compress：** 丢掉的消息数、`tokens_before` / `tokens_after`。不记摘要正文。
+- **subagent.{id}：** 墙钟、status、depth、子 run 的 turn 数。
+- **run 结束：** `prompt_tokens`、`completion_tokens`、`web_search` 次数、status。供应商不回 usage 时 span 仍在，数字留空。
+
+看 trace：已登录的 [Opik](https://www.comet.com/opik) 项目页，workspace `jasonhuang115`，项目 `deep-research`。一条研究会话一条 `run`。
+
+配置：agent 启动时读仓库根 `.env`，已有环境变量不覆盖。`OPIK_API_KEY`，没有则用 `Opik_key`。`OPIK_WORKSPACE` 默认 `jasonhuang115`，`OPIK_PROJECT_NAME` 默认 `deep-research`。`OPIK_URL_OVERRIDE` 只给自建。
+
+仍未做：按租户采样；超预算在 trace 里打标并驱动 run `incomplete`（现在没有花费预算，只有压缩用的 `AGENT_CONTEXT_INPUT_BUDGET`）；`browser` span。用户轨迹和可信度仍是第 11.2 节。
 
 ### 11.2 给用户：轨迹 + 可信度
 
@@ -494,7 +504,7 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 1. 绑定加固（第 3.3 节）：Redis/本地路径带 tenant，禁止空 tenant → `default`
 2. 来源可到达 / 质量标签进 ledger
 3. 异步 subagent + 落盘报告 + 完成唤醒：**已做。** 不要做 Teams。
-4. Opik trace（开发消耗）；用户轨迹 UI 可并行
+4. Opik 开发 trace：**已做。** 用户轨迹 UI 仍可后做
 5. Skill 文档；需要时再 MCP（澄清可先当一条 grill skill）
 6. **澄清模式**（禁搜追问 → `brief.md`）再接 Plan + 中途 HITL
 7. 无头渲染 / 白名单 browser（fetch 诚实失败不够用再上）
@@ -504,9 +514,11 @@ Agent 配置里预留 `OPIK_*`；未配置则 no-op，不挡 run。
 
 ## 14. 本轮框架留下的缺口
 
-**问题：** 问答 loop 已经能跑，但工具没有工作区、长输出不会续写、上下文不会裁。后面接第 1–13 节时，应先补这些缝，而不是改 loop 结构。
+**状态：** 14.1 工作区、14.2 真搜索、14.3 触顶续写、14.4 压缩已做。
 
-挂钩已经在代码里：`default_registry()`、`prepare_messages()`（配对安全摘要压缩）、`FinishKind.OUTPUT_LIMIT`（现在当截断终稿，不续写）。不要再抽一层空的 Sandbox Protocol。
+**问题：** 问答 loop 已经能跑。工作区、真搜索、触顶续写、上下文压缩都已补上。下面各小节保留当时的缺口说明。
+
+挂钩已经在代码里：`default_registry()`、`prepare_messages()`（配对安全摘要压缩）、`FinishKind.OUTPUT_LIMIT`（纯文本续写，截断的 tool call 整段重生成）。不要再抽一层空的 Sandbox Protocol。
 
 ### 14.1 工作区，让 Read / Write / Bash 真正执行
 
@@ -531,11 +543,12 @@ Go `AGENT_BASE_URL` 反代 `GET /v1/runs/{run_id}/artifacts/{path}`：本轮 Fas
 
 ### 14.3 输出触顶续写
 
-供应商 `finish_reason=length`（及同类）时，现在把已有正文当终稿并 `truncated=true`，**不会**在同一条逻辑 assistant 消息里续写。
+**状态：done。** 对齐 Discovery 的 `_stream_assistant_response`。同一条逻辑回答内部续写，不新开聊天消息。
 
-架构稿 §4.2：纯文本截断则 commit 已有正文、`tool_choice=none` 再要续写（默认最多 2 次）、去重叠；tool call 参数不完整则整段重生成。对外仍一次 `message.completed`。可加透传事件 `output_continuation`。
-
-落点：[`research_engine/loop.py`](../agent/src/research_engine/loop.py) + [`completion.py`](../agent/src/research_engine/completion.py)。`FinishKind.OUTPUT_LIMIT` 已有，缺的是续写策略。
+- 纯文本 `finish_reason=length`（及同类）：commit 已有正文，临时加上 `assistant(已有正文)` + 续写指令，`tool_choice=none`，最多 `AGENT_MAX_OUTPUT_CONTINUATIONS` 次（默认 2）。续写段去掉约 2KB 内、至少 16 字的后缀/前缀重叠。开始续写时透传 `output_continuation`。
+- 次数用尽仍截断：拼好的正文一次 `message.completed`，`truncated=true`，run 仍 `succeeded`。
+- tool call 在 `output_limit` 上：丢弃该段、不执行，整段重生成最多 2 次。两次仍截断则 `truncated_tool_call`，run `failed`。
+- 压缩时续写指令和它前面的半成品 assistant 成对保留。
 
 ### 14.4 上下文滑窗
 

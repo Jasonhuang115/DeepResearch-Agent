@@ -30,6 +30,22 @@ def test_estimate_tokens_cjk_and_ascii() -> None:
     assert estimate_tokens("a" * 8) == 2
 
 
+def test_split_keeps_continuation_with_partial() -> None:
+    from research_engine.continuation import CONTINUATION_PROMPT
+
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "partial report"},
+        {"role": "user", "content": CONTINUATION_PROMPT},
+    ]
+    _system, blocks = split_pair_blocks(messages)
+    assert blocks[-1] == [
+        {"role": "assistant", "content": "partial report"},
+        {"role": "user", "content": CONTINUATION_PROMPT},
+    ]
+
+
 def test_split_keeps_tool_pairs_together() -> None:
     messages = [
         {"role": "system", "content": "sys"},
