@@ -189,6 +189,15 @@ func (h *Handlers) ListMessages(c *gin.Context) {
 	httpx.OK(c, out)
 }
 
+func (h *Handlers) ListSubagents(c *gin.Context) {
+	out, err := h.Conv.Subagents(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, out)
+}
+
 func (h *Handlers) PostMessage(c *gin.Context) {
 	if cached, ok := h.idempotentGet(c); ok {
 		c.Data(http.StatusOK, "application/json", cached)

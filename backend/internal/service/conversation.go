@@ -210,6 +210,46 @@ func (s *Conversations) Messages(ctx context.Context, convPublic string, beforeI
 	return ListOut[MessageView]{Items: out, NextBefore: next}, nil
 }
 
+func (s *Conversations) Subagents(ctx context.Context, convPublic string) (ListOut[SubagentView], error) {
+	c, err := s.Repo.ConversationByPublic(ctx, convPublic)
+	if err != nil {
+		return ListOut[SubagentView]{}, err
+	}
+	if c == nil {
+		return ListOut[SubagentView]{}, httpx.ErrNotFound
+	}
+	rows, err := s.Repo.ListSubagentRuns(ctx, c.ID)
+	if err != nil {
+		return ListOut[SubagentView]{}, err
+	}
+	parentIDs := make([]int64, 0, len(rows))
+	seen := map[int64]bool{}
+	for _, row := range rows {
+		if row.ParentRunID == nil || seen[*row.ParentRunID] {
+			continue
+		}
+		seen[*row.ParentRunID] = true
+		parentIDs = append(parentIDs, *row.ParentRunID)
+	}
+	parents, err := s.Repo.RunsByIDs(ctx, parentIDs)
+	if err != nil {
+		return ListOut[SubagentView]{}, err
+	}
+	publicByID := map[int64]string{}
+	for _, parent := range parents {
+		publicByID[parent.ID] = parent.PublicID
+	}
+	items := make([]SubagentView, 0, len(rows))
+	for _, row := range rows {
+		parentPublic := ""
+		if row.ParentRunID != nil {
+			parentPublic = publicByID[*row.ParentRunID]
+		}
+		items = append(items, subagentView(row, parentPublic))
+	}
+	return ListOut[SubagentView]{Items: items}, nil
+}
+
 func (s *Conversations) PostMessage(ctx context.Context, convPublic, content string, files []upload.Incoming) (MessageView, RunView, error) {
 	content = strings.TrimSpace(content)
 	if err := validateMessage(content, len(files)); err != nil {

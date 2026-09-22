@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 
+	"deepresearch/internal/model"
 	"deepresearch/internal/mq"
 	"deepresearch/internal/repo"
 )
@@ -31,6 +32,11 @@ func (p *Persist) Handle(ctx context.Context, raw []byte) error {
 	if err != nil {
 		return err
 	}
+	if ev.Type == "subagent.started" {
+		if err := p.ensureSubagentRun(ctx, run, ev); err != nil {
+			return err
+		}
+	}
 	if !inserted {
 		return nil
 	}
@@ -44,13 +50,27 @@ func (p *Persist) Handle(ctx context.Context, raw []byte) error {
 		return err
 	}
 	if clear {
-		if err := p.Repo.ClearActiveRun(ctx, run.ConversationID, run.ID); err != nil {
+		cleared, err := p.Repo.ClearActiveRun(ctx, run.ConversationID, run.ID)
+		if err != nil {
 			return err
 		}
-		if p.OnRunCleared != nil {
+		if notifyCleared(cleared) && p.OnRunCleared != nil {
 			p.OnRunCleared(ctx, run.ConversationID)
 		}
 	}
 	_ = p.Repo.TouchConversation(ctx, run.ConversationID)
 	return nil
+}
+
+func (p *Persist) ensureSubagentRun(ctx context.Context, parent *model.Run, ev mq.Event) error {
+	row, err := SubagentRunFromEvent(parent, ev)
+	if err != nil {
+		slog.Warn("subagent.started ignored", "err", err, "run_id", parent.PublicID)
+		return nil
+	}
+	return p.Repo.CreateSubagentRun(ctx, row)
+}
+
+func notifyCleared(cleared bool) bool {
+	return cleared
 }

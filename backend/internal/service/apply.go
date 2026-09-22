@@ -37,6 +37,9 @@ func ApplySideEffects(run *model.Run, ev mq.Event) (assistant *model.Message, cl
 			run.Status = model.RunRunning
 		}
 	case "message.completed":
+		if run.Kind == model.RunKindSubagent {
+			break
+		}
 		content := payloadContent(ev.Payload)
 		assistant = &model.Message{
 			PublicID:       id.New("msg_"),

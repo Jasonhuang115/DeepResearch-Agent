@@ -23,8 +23,9 @@ Envelope on Kafka and SSE `data`:
 | `text_delta` | `delta` | none |
 | `tool_call.started` | `tool_call_id`, `name`, `args?` | none |
 | `tool_call.finished` | `tool_call_id`, `ok`, `summary?` | none |
-| `message.completed` | `content`, `truncated?` | insert assistant message |
-| `run.finished` | `status`, `error?` | update run, clear active_run_id |
+| `message.completed` | `content`, `truncated?` | insert assistant message. A `kind=subagent` run stores the event and does not insert a chat message. |
+| `run.finished` | `status`, `error?` | update run. Clear `active_run_id` only when this run holds it. A subagent finish does not wake the main run. |
+| `subagent.started` | `subagent_id`, `child_run_id`, `description`, `depth`, `parent_subagent_id?` | insert a `kind=subagent` run. Does not claim `active_run`. Grandchild events are emitted on the child run. |
 | `error` | `message` | none |
 | `source.added` | `source_id`, `url`, `title?` | none (store + forward) |
 | `context.compacted` | `dropped_messages?`, `kept_messages?`, `tokens_before?` | none (store + forward) |

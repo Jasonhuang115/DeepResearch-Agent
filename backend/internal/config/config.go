@@ -26,6 +26,7 @@ type Config struct {
 	RefreshTTL          time.Duration `env:"REFRESH_TTL" envDefault:"168h"`
 	QueuedTimeout       time.Duration `env:"QUEUED_TIMEOUT_SEC" envDefault:"60s"`
 	RunningStale        time.Duration `env:"RUNNING_STALE_SEC" envDefault:"120s"`
+	SubagentOrphan      time.Duration `env:"SUBAGENT_ORPHAN_SEC" envDefault:"7200s"`
 	JournalRetention    time.Duration `env:"JOURNAL_RETENTION_DAYS" envDefault:"168h"`
 	RateLimitPerMinute  int           `env:"RATE_LIMIT_PER_MINUTE" envDefault:"120"`
 	HistoryMessageLimit int           `env:"HISTORY_MESSAGE_LIMIT" envDefault:"40"`
@@ -52,6 +53,12 @@ func Load() (Config, error) {
 	}
 	if c.RunningStale < time.Second {
 		c.RunningStale = time.Duration(c.RunningStale) * time.Second
+	}
+	if c.SubagentOrphan < time.Second {
+		c.SubagentOrphan = time.Duration(c.SubagentOrphan) * time.Second
+	}
+	if c.SubagentOrphan <= 0 {
+		c.SubagentOrphan = 2 * time.Hour
 	}
 	if c.JournalRetention < time.Hour {
 		c.JournalRetention = c.JournalRetention * 24 * time.Hour

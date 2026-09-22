@@ -154,7 +154,11 @@ async def run_research(
         )
         registry.register(
             "spawn_subagent",
-            supervisor.spawn_tool(str(cmd.get("conversation_id") or ""), 0),
+            supervisor.spawn_tool(
+                str(cmd.get("conversation_id") or ""),
+                0,
+                parent_emitter=seq,
+            ),
             description=SPAWN_DESCRIPTION,
             parameters=SPAWN_PARAMETERS,
         )

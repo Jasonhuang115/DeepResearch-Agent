@@ -12,11 +12,11 @@ import (
 )
 
 type Deps struct {
-	Cfg    config.Config
-	Auth   *service.Auth
-	Conv   *service.Conversations
-	Redis  *cache.Redis
-	Hub    *sse.Hub
+	Cfg   config.Config
+	Auth  *service.Auth
+	Conv  *service.Conversations
+	Redis *cache.Redis
+	Hub   *sse.Hub
 }
 
 func Router(d Deps) *gin.Engine {
@@ -48,6 +48,7 @@ func Router(d Deps) *gin.Engine {
 	authed.PATCH("/conversations/:id", h.PatchConversation)
 	authed.DELETE("/conversations/:id", h.DeleteConversation)
 	authed.GET("/conversations/:id/messages", h.ListMessages)
+	authed.GET("/conversations/:id/subagents", h.ListSubagents)
 	authed.POST("/conversations/:id/messages", h.PostMessage)
 	authed.GET("/runs/:id", h.GetRun)
 	authed.POST("/runs/:id/cancel", h.CancelRun)

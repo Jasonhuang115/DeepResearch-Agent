@@ -4,6 +4,7 @@ import asyncio
 import logging
 import math
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,6 +54,7 @@ SPAWN_PARAMETERS: dict[str, Any] = {
 PublishWake = Callable[[dict[str, Any]], Awaitable[None]]
 LLMFactory = Callable[[], LLMClient]
 RegistryFactory = Callable[["Job", Workspace, "Session | None"], ToolRegistry]
+EventFactory = Callable[[str, str, str], Any]
 
 
 def subagent_system(description: str, *, depth: int, can_spawn: bool) -> str:
@@ -92,6 +94,7 @@ class Job:
     depth: int
     description: str
     max_time: float
+    run_id: str = ""
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     suppress_wake: bool = False
     timed_out: bool = False
@@ -109,6 +112,7 @@ class Supervisor:
         self._publish = publish_wake
         self._llm_factory = llm_factory
         self._registry_factory = registry_factory
+        self._event_factory: EventFactory | None = None
         self._lock = asyncio.Lock()
         self._sessions: dict[str, Session] = {}
         self._running: dict[str, dict[str, Job]] = {}
@@ -117,6 +121,9 @@ class Supervisor:
 
     def bind_publisher(self, publish_wake: PublishWake) -> None:
         self._publish = publish_wake
+
+    def bind_events(self, factory: EventFactory) -> None:
+        self._event_factory = factory
 
     def note_session(
         self,
@@ -146,13 +153,34 @@ class Supervisor:
         current.fetcher = fetcher
         current.store = store
 
-    def spawn_tool(self, conversation_id: str, parent_depth: int) -> Callable[[dict[str, Any]], Awaitable[str]]:
+    def spawn_tool(
+        self,
+        conversation_id: str,
+        parent_depth: int,
+        *,
+        parent_emitter: Any = None,
+        parent_subagent_id: str | None = None,
+    ) -> Callable[[dict[str, Any]], Awaitable[str]]:
         async def spawn(args: dict[str, Any]) -> str:
-            return await self.spawn(conversation_id, parent_depth, args)
+            return await self.spawn(
+                conversation_id,
+                parent_depth,
+                args,
+                parent_emitter=parent_emitter,
+                parent_subagent_id=parent_subagent_id,
+            )
 
         return spawn
 
-    async def spawn(self, conversation_id: str, parent_depth: int, args: dict[str, Any]) -> str:
+    async def spawn(
+        self,
+        conversation_id: str,
+        parent_depth: int,
+        args: dict[str, Any],
+        *,
+        parent_emitter: Any = None,
+        parent_subagent_id: str | None = None,
+    ) -> str:
         if parent_depth >= MAX_DEPTH:
             return "error: spawn depth exceeded"
         description = str(args.get("description") or "").strip()
@@ -202,6 +230,22 @@ class Supervisor:
         except Exception as exc:  # noqa: BLE001
             await self._release(job)
             return f"error: {exc}"
+
+        if parent_emitter is not None:
+            job.run_id = new_run_public_id()
+            payload: dict[str, Any] = {
+                "subagent_id": sub_id,
+                "child_run_id": job.run_id,
+                "description": description[:512],
+                "depth": job.depth,
+            }
+            if parent_subagent_id:
+                payload["parent_subagent_id"] = parent_subagent_id
+            try:
+                await parent_emitter.emit("subagent.started", payload)
+            except Exception as exc:  # noqa: BLE001
+                await self._release(job)
+                return f"error: {exc}"
 
         job.task = asyncio.create_task(self._drive(job), name=f"subagent-{sub_id}")
         return f"spawned id={sub_id} status=running report={report_path(sub_id)}"
@@ -305,7 +349,8 @@ class Supervisor:
             await sink.emit("run.finished", {"status": "failed", "error": "workspace is not available"})
             return
         llm = self._llm()
-        tools = self._registry(job, workspace, session)
+        child_seq = self._child_emitter(job)
+        tools = self._registry(job, workspace, session, child_seq)
         messages = [
             {
                 "role": "system",
@@ -317,17 +362,27 @@ class Supervisor:
             },
             {"role": "user", "content": job.description},
         ]
+        target = sink
+        if child_seq is not None:
+            await child_seq.emit("run.started", {})
+            target = _Tee(sink, child_seq)
         await run_loop(
             llm=llm,
             tools=tools,
             messages=messages,
-            seq=sink,
+            seq=target,
             cancel=job.cancel,
             max_turns=None,
             max_report_chars=settings.max_report_chars,
         )
 
-    def _registry(self, job: Job, workspace: Workspace, session: Session | None) -> ToolRegistry:
+    def _registry(
+        self,
+        job: Job,
+        workspace: Workspace,
+        session: Session | None,
+        child_seq: Any = None,
+    ) -> ToolRegistry:
         if self._registry_factory is not None:
             return self._registry_factory(job, workspace, session)
         ledger = session.ledger if session and session.ledger is not None else SourceLedger(workspace)
@@ -347,7 +402,12 @@ class Supervisor:
         if job.depth < MAX_DEPTH:
             registry.register(
                 "spawn_subagent",
-                self.spawn_tool(job.conversation_id, job.depth),
+                self.spawn_tool(
+                    job.conversation_id,
+                    job.depth,
+                    parent_emitter=child_seq,
+                    parent_subagent_id=job.sub_id,
+                ),
                 description=SPAWN_DESCRIPTION,
                 parameters=SPAWN_PARAMETERS,
             )
@@ -357,6 +417,13 @@ class Supervisor:
         if self._llm_factory is None:
             raise RuntimeError("subagent llm factory is not configured")
         return self._llm_factory()
+
+    def _child_emitter(self, job: Job) -> Any:
+        if not job.run_id or self._event_factory is None:
+            return None
+        session = self._sessions.get(job.conversation_id)
+        tenant_id = session.tenant_id if session is not None else ""
+        return self._event_factory(job.run_id, job.conversation_id, tenant_id)
 
     def _workspace(self, job: Job) -> Workspace:
         session = self._sessions.get(job.conversation_id)
@@ -428,3 +495,16 @@ def _sandbox_id(workspace: Workspace) -> str | None:
     client = getattr(inner, "client", None)
     sid = getattr(client, "sandbox_id", None)
     return str(sid) if sid else None
+
+
+def new_run_public_id() -> str:
+    return "run_" + uuid.uuid4().hex
+
+
+class _Tee:
+    def __init__(self, *sinks: Any) -> None:
+        self._sinks = sinks
+
+    async def emit(self, typ: str, payload: dict | None = None) -> None:
+        for sink in self._sinks:
+            await sink.emit(typ, payload)

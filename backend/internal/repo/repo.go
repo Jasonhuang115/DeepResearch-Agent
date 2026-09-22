@@ -129,10 +129,11 @@ func (r *Repo) ClaimActiveRun(ctx context.Context, convID, runID int64) (bool, e
 	return res.RowsAffected == 1, res.Error
 }
 
-func (r *Repo) ClearActiveRun(ctx context.Context, convID, runID int64) error {
-	return r.sys(ctx).Model(&model.Conversation{}).
+func (r *Repo) ClearActiveRun(ctx context.Context, convID, runID int64) (bool, error) {
+	res := r.sys(ctx).Model(&model.Conversation{}).
 		Where("id = ? AND active_run_id = ?", convID, runID).
-		Update("active_run_id", nil).Error
+		Update("active_run_id", nil)
+	return res.RowsAffected == 1, res.Error
 }
 
 func (r *Repo) TouchConversation(ctx context.Context, id int64) error {
@@ -140,13 +141,28 @@ func (r *Repo) TouchConversation(ctx context.Context, id int64) error {
 }
 
 func (r *Repo) CreateRunSystem(ctx context.Context, run *model.Run) error {
+	if run.Kind == "" {
+		run.Kind = model.RunKindMain
+	}
 	return r.sys(ctx).Create(run).Error
+}
+
+func (r *Repo) CreateSubagentRun(ctx context.Context, run *model.Run) error {
+	run.Kind = model.RunKindSubagent
+	err := r.sys(ctx).Create(run).Error
+	if isDup(err) {
+		return nil
+	}
+	return err
 }
 
 func (r *Repo) CreateRun(ctx context.Context, run *model.Run) error {
 	p := tenant.MustFrom(ctx)
 	run.TenantID = p.TenantID
 	run.UserID = p.UserID
+	if run.Kind == "" {
+		run.Kind = model.RunKindMain
+	}
 	return r.DB.System(ctx).Create(run).Error
 }
 
@@ -276,10 +292,38 @@ func (r *Repo) SaveRun(ctx context.Context, run *model.Run) error {
 func (r *Repo) StaleRuns(ctx context.Context, queuedAfter, runningAfter time.Time) ([]model.Run, error) {
 	var out []model.Run
 	err := r.sys(ctx).
-		Where("(status = ? AND created_at < ?) OR (status = ? AND COALESCE(last_event_at, updated_at) < ?)",
-			model.RunQueued, queuedAfter, model.RunRunning, runningAfter).
+		Where("kind <> ? AND ((status = ? AND created_at < ?) OR (status = ? AND COALESCE(last_event_at, updated_at) < ?))",
+			model.RunKindSubagent, model.RunQueued, queuedAfter, model.RunRunning, runningAfter).
 		Limit(100).
 		Find(&out).Error
+	return out, err
+}
+
+func (r *Repo) OrphanSubagentRuns(ctx context.Context, before time.Time) ([]model.Run, error) {
+	var out []model.Run
+	err := r.sys(ctx).
+		Where("kind = ? AND status IN ? AND COALESCE(last_event_at, created_at) < ?",
+			model.RunKindSubagent, []string{model.RunQueued, model.RunRunning}, before).
+		Limit(100).
+		Find(&out).Error
+	return out, err
+}
+
+func (r *Repo) ListSubagentRuns(ctx context.Context, conversationID int64) ([]model.Run, error) {
+	var out []model.Run
+	err := r.scoped(ctx).
+		Where("conversation_id = ? AND kind = ?", conversationID, model.RunKindSubagent).
+		Order("id ASC").
+		Find(&out).Error
+	return out, err
+}
+
+func (r *Repo) RunsByIDs(ctx context.Context, ids []int64) ([]model.Run, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var out []model.Run
+	err := r.scoped(ctx).Where("id IN ?", ids).Find(&out).Error
 	return out, err
 }
 

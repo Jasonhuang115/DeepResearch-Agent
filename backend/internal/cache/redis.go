@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -53,9 +54,15 @@ func (r *Redis) Del(ctx context.Context, key string) error {
 }
 
 func (r *Redis) IncrWindow(ctx context.Context, key string, window time.Duration) (int64, error) {
+	sec := int64(window / time.Second)
+	if sec < 1 {
+		sec = 1
+	}
+	// Bucket by the window so a busy client cannot keep one counter alive forever.
+	k := key + ":" + strconv.FormatInt(time.Now().Unix()/sec, 10)
 	pipe := r.C.TxPipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, window)
+	incr := pipe.Incr(ctx, k)
+	pipe.Expire(ctx, k, time.Duration(sec)*time.Second+time.Second)
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return 0, err

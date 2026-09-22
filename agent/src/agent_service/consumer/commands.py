@@ -38,6 +38,14 @@ class Runtime:
         await consumer.start()
         await producer.start()
         self.supervisor.bind_publisher(lambda payload: _publish_wake(producer, payload))
+        self.supervisor.bind_events(
+            lambda run_id, conversation_id, tenant_id: EventSeq(
+                producer,
+                run_id=run_id,
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+            )
+        )
         self.kafka_ok = True
         log.info("consuming %s", settings.commands_topic)
         try:

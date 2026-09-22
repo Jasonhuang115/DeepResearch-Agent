@@ -158,7 +158,9 @@ subagents/{id}/
 tool-output/{id}/{tool_call_id}.txt
 ```
 
-结论文本是回答通道的 `text_delta`。reasoning 和工具正文不进 `report.md`。`web_search` / `web_fetch` 仍只落在 `sources/`。其余工具结果无论长短都写入 `tool-output/{id}/`。子 loop 的 `text_delta` / `message.completed` 不送进会话，用户聊天里没有子 agent 自己的气泡。
+结论文本是回答通道的 `text_delta`。reasoning 和工具正文不进 `report.md`。`web_search` / `web_fetch` 仍只落在 `sources/`。其余工具结果无论长短都写入 `tool-output/{id}/`。同一段结论文本同时写进该 subagent 自己的 run 事件。主会话不插入子 agent 的聊天气泡。
+
+派发时先在父 run 上写 `subagent.started`（`subagent_id`、`child_run_id`、`description`、`depth`、`parent_subagent_id`），再让子 loop 用 `child_run_id` 发 `run.started`、`text_delta`、工具事件和 `run.finished`。孙的 `subagent.started` 打在子 run 上。这条 run 不占用会话的 `active_run`。120 秒的 running-stale 不收它；进程死后由更长的 `SUBAGENT_ORPHAN_SEC` 收成失败。`GET /v1/conversations/:id/subagents` 把这些行交给前端。一轮主 run 在主线上只挂一颗汇总按钮，点开右侧抽屉看选中的那条 run。
 
 检测点是 supervisor 里的任务结束，不是让模型去轮询。
 

@@ -3,12 +3,28 @@ import { Link, useNavigate, useParams } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { api, clearSession, getUser, newIdempotencyKey } from '../api/client'
 import type { Conversation, List, Message, Run } from '../api/types'
+import { SubagentChip, SubagentDrawer } from '../components/SubagentDrawer'
 import { ToolCallCard } from '../components/ToolCallCard'
 import { useRunStream, type Live } from '../hooks/useRunStream'
 import { Markdown } from '../lib/Markdown'
+import { cohortFor, type SubagentRun } from '../lib/subagents'
 import { fetchRunTrace, mergeTrace, type Trace } from '../lib/trace'
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled'])
+
+function httpStatus(error: unknown) {
+  if (typeof error === 'object' && error && 'status' in error) {
+    const status = (error as { status?: number }).status
+    return typeof status === 'number' ? status : 0
+  }
+  return 0
+}
+
+function retryQuery(failureCount: number, error: unknown) {
+  const status = httpStatus(error)
+  if (status === 404 || status === 429) return false
+  return failureCount < 2
+}
 const ACCEPT_EXT = ['.pdf', '.docx', '.txt', '.md', '.csv']
 const MAX_FILES = 5
 const MAX_BYTES = 20 * 1024 * 1024
@@ -47,9 +63,14 @@ function rejectReason(f: File): string | null {
 function explainSendError(err: unknown) {
   const e = err as Error & { status?: number }
   const msg = e?.message || '发送失败'
+  if (e?.status === 429 || msg === 'rate limited') return '请求太频繁，请稍后再试'
   if (e?.status === 409 || msg.includes('already active')) return '请等当前研究完成后再发送'
   if (e?.status === 404 || msg === 'not found') return '当前对话不可用，请点左侧 New research 开新对话'
   return msg
+}
+
+function pollInterval(ms: number) {
+  return (query: { state: { error: unknown } }) => (httpStatus(query.state.error) === 429 ? 30_000 : ms)
 }
 
 function mergeFiles(cur: File[], incoming: File[]): { next: File[]; errors: string[] } {
@@ -91,6 +112,7 @@ export function WorkspacePage() {
   } | null>(null)
   const [localRun, setLocalRun] = useState<{ id: string; conversationId: string } | null>(null)
   const [held, setHeld] = useState<Live | null>(null)
+  const [drawerParent, setDrawerParent] = useState<string | null>(null)
   const [traces, setTraces] = useState<Record<string, Trace>>({})
   const tracesRef = useRef(traces)
   tracesRef.current = traces
@@ -105,16 +127,30 @@ export function WorkspacePage() {
     queryKey: ['conversation', conversationId],
     queryFn: () => api<Conversation>(`/v1/conversations/${conversationId}`),
     enabled: !!conversationId,
-    refetchInterval: 2000,
+    retry: retryQuery,
+    refetchInterval: pollInterval(2000),
   })
 
   const messages = useQuery({
     queryKey: ['messages', conversationId],
     queryFn: () => api<List<Message>>(`/v1/conversations/${conversationId}/messages?limit=100`),
     enabled: !!conversationId,
-    refetchInterval: () => (detail.data?.active_run ? 2000 : false),
+    retry: retryQuery,
+    refetchInterval: (query) => {
+      if (httpStatus(query.state.error) === 429 || httpStatus(detail.error) === 429) return 30_000
+      return detail.data?.active_run ? 2000 : false
+    },
   })
 
+  const subagents = useQuery({
+    queryKey: ['subagents', conversationId],
+    queryFn: () => api<List<SubagentRun>>(`/v1/conversations/${conversationId}/subagents`),
+    enabled: !!conversationId,
+    retry: retryQuery,
+    refetchInterval: pollInterval(2000),
+  })
+
+  const missingConversation = httpStatus(detail.error) === 404
   const activeRunId = detail.data?.active_run?.id ?? null
   const runId =
     localRun && conversationId && localRun.conversationId === conversationId ? localRun.id : activeRunId
@@ -126,6 +162,7 @@ export function WorkspacePage() {
     setFiles([])
     setAttachError(null)
     setDragging(false)
+    setDrawerParent(null)
     stickToBottom.current = true
   }, [conversationId])
 
@@ -257,6 +294,7 @@ export function WorkspacePage() {
   }, [history, pending, conversationId])
 
   const display = live ?? held
+  const subagentItems = subagents.data?.items ?? []
   const historyHasLive = !!display && shown.some((m) => m.role === 'assistant' && m.run_id === display.runId)
   const showLive = !!runId && !!display && display.runId === runId && !historyHasLive
   const active = showLive && !TERMINAL.has(display?.status ?? '')
@@ -369,7 +407,7 @@ export function WorkspacePage() {
         )}
       </aside>
 
-      <main className="flex-1 flex flex-col min-w-0">
+      <main className={`flex-1 flex flex-col min-w-0${drawerParent ? ' dx-workspace--drawer' : ''}`}>
         <header className="h-10 px-4 border-b border-[#2a2a2a] flex items-center justify-between gap-3 text-[#8a8a8a] text-xs">
           <div className="min-w-0 flex items-center">
             <span className="truncate">{conversationId ? detail.data?.title || 'New thread' : 'New thread'}</span>
@@ -399,7 +437,7 @@ export function WorkspacePage() {
           }}
         >
           <div className="max-w-3xl mx-auto space-y-5">
-            {conversationId && detail.isError && (
+            {conversationId && missingConversation && (
               <div className="border border-red-900 bg-[#1a1010] px-3 py-2 text-[12px] text-red-400">
                 找不到这个对话（可能属于别的账号）。
                 <button className="ml-2 underline" onClick={() => nav({ to: '/' })}>
@@ -407,12 +445,16 @@ export function WorkspacePage() {
                 </button>
               </div>
             )}
-            {shown.length === 0 && !pending && !detail.isError && (
+            {conversationId && !missingConversation && (detail.isError || messages.isError) && shown.length === 0 && (
+              <p className="text-red-400 pt-16 text-sm">{explainSendError(messages.error || detail.error)}</p>
+            )}
+            {shown.length === 0 && !pending && !missingConversation && !detail.isError && !messages.isError && (
               <p className="text-[#8a8a8a] pt-16">Ask a research question. Cmd+Enter to send.</p>
             )}
             {shown.map((m) => {
               const trace = m.run_id ? traces[m.run_id] : undefined
               const hideBody = showLive && display?.runId === m.run_id && m.role === 'assistant'
+              const cohort = m.role === 'assistant' && m.run_id ? cohortFor(subagentItems, m.run_id) : []
               if (hideBody) return null
               return (
                 <article key={m.id}>
@@ -424,6 +466,9 @@ export function WorkspacePage() {
                         tools={trace?.tools ?? []}
                         open={m.id === lastAssistantId}
                       />
+                      {cohort.length > 0 && m.run_id ? (
+                        <SubagentChip items={cohort} onOpen={() => setDrawerParent(m.run_id ?? null)} />
+                      ) : null}
                       <Markdown text={m.content} />
                     </>
                   ) : (
@@ -435,7 +480,13 @@ export function WorkspacePage() {
                 </article>
               )
             })}
-            {showLive && display && <LivePane live={display} />}
+            {showLive && display && (
+              <LivePane
+                live={display}
+                cohort={runId ? cohortFor(subagentItems, runId) : []}
+                onOpenCohort={() => runId && setDrawerParent(runId)}
+              />
+            )}
           </div>
         </div>
 
@@ -493,14 +544,14 @@ export function WorkspacePage() {
               onPaste={(e) => {
                 if (e.clipboardData?.files?.length) addFiles(Array.from(e.clipboardData.files))
               }}
-              disabled={running || send.isPending || detail.isError}
+              disabled={running || send.isPending || missingConversation}
             />
             <div className="flex items-center gap-2 px-2 pb-2">
               <input
                 type="file"
                 multiple
                 accept=".pdf,.docx,.txt,.md,.csv"
-                disabled={send.isPending || detail.isError}
+                disabled={send.isPending || missingConversation}
                 className="min-w-0 flex-1 text-[11px] text-[#8a8a8a] file:mr-2 file:border file:border-[#2a2a2a] file:bg-[#1c1c1c] file:px-2 file:py-0.5 file:text-[#e8e8e8] file:cursor-pointer"
                 onChange={(e) => {
                   addFiles(Array.from(e.target.files ?? []))
@@ -514,7 +565,7 @@ export function WorkspacePage() {
               ) : (
                 <button
                   onClick={submit}
-                  disabled={(!draft.trim() && files.length === 0) || send.isPending || detail.isError}
+                  disabled={(!draft.trim() && files.length === 0) || send.isPending || missingConversation}
                   className="shrink-0 border border-[#2a2a2a] px-2 py-0.5 text-xs disabled:opacity-40"
                 >
                   {send.isPending ? 'Sending…' : 'Send'}
@@ -524,6 +575,9 @@ export function WorkspacePage() {
           </div>
         </div>
       </main>
+      {drawerParent ? (
+        <SubagentDrawer items={cohortFor(subagentItems, drawerParent)} onClose={() => setDrawerParent(null)} />
+      ) : null}
     </div>
   )
 }
@@ -571,11 +625,20 @@ function TraceBlock({
   )
 }
 
-function LivePane({ live }: { live: Live }) {
+function LivePane({
+  live,
+  cohort,
+  onOpenCohort,
+}: {
+  live: Live
+  cohort: SubagentRun[]
+  onOpenCohort: () => void
+}) {
   const waiting = !live.text && !live.reasoning && live.tools.length === 0 && !live.error
   return (
     <article>
       <div className="text-[11px] text-[#8a8a8a] mb-1">assistant</div>
+      {cohort.length > 0 && <SubagentChip items={cohort} onOpen={onOpenCohort} />}
       {waiting && (
         <details className="mb-2 text-[#8a8a8a]" open>
           <summary className="cursor-pointer">thinking</summary>

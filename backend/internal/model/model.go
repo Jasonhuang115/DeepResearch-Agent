@@ -50,23 +50,33 @@ const (
 	RunSucceeded = "succeeded"
 	RunFailed    = "failed"
 	RunCancelled = "cancelled"
+	RunTimedOut  = "timed_out"
+
+	RunKindMain     = "main"
+	RunKindSubagent = "subagent"
 )
 
 func Terminal(status string) bool {
-	return status == RunSucceeded || status == RunFailed || status == RunCancelled
+	return status == RunSucceeded || status == RunFailed || status == RunCancelled || status == RunTimedOut
 }
 
 type Run struct {
-	ID             int64      `gorm:"primaryKey"`
-	PublicID       string     `gorm:"column:public_id;size:40;uniqueIndex"`
-	TenantID       int64      `gorm:"index"`
-	UserID         int64      `gorm:"index"`
-	ConversationID int64      `gorm:"index"`
-	Status         string     `gorm:"size:24"`
-	ErrorMessage   *string    `gorm:"column:error_message"`
-	LastEventAt    *time.Time `gorm:"column:last_event_at"`
-	CreatedAt      time.Time  `gorm:"autoCreateTime"`
-	UpdatedAt      time.Time  `gorm:"autoUpdateTime"`
+	ID               int64      `gorm:"primaryKey"`
+	PublicID         string     `gorm:"column:public_id;size:40;uniqueIndex"`
+	TenantID         int64      `gorm:"index"`
+	UserID           int64      `gorm:"index"`
+	ConversationID   int64      `gorm:"index"`
+	Kind             string     `gorm:"size:16"`
+	SubagentID       *string    `gorm:"column:subagent_id;size:64"`
+	ParentRunID      *int64     `gorm:"column:parent_run_id"`
+	ParentSubagentID *string    `gorm:"column:parent_subagent_id;size:64"`
+	Description      *string    `gorm:"size:512"`
+	Depth            int        `gorm:"column:depth"`
+	Status           string     `gorm:"size:24"`
+	ErrorMessage     *string    `gorm:"column:error_message"`
+	LastEventAt      *time.Time `gorm:"column:last_event_at"`
+	CreatedAt        time.Time  `gorm:"autoCreateTime"`
+	UpdatedAt        time.Time  `gorm:"autoUpdateTime"`
 }
 
 func (Run) TableName() string { return "runs" }

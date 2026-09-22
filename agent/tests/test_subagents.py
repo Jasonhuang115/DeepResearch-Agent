@@ -490,3 +490,87 @@ async def test_main_run_spawn_does_not_stream_the_child_into_chat(tmp_path: Path
         await supervisor.settle()
     assert wakes and wakes[0]["id"] == "alpha"
     assert wakes[0]["status"] == "succeeded"
+
+
+async def test_child_run_events_follow_started_and_report_stays_conclusions(tmp_path: Path) -> None:
+    order: list[tuple[str, str]] = []
+
+    class LogSeq:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.events: list[tuple[str, dict]] = []
+
+        async def emit(self, typ: str, payload: dict | None = None) -> None:
+            data = payload or {}
+            self.events.append((typ, data))
+            order.append((self.name, typ))
+
+    parent = LogSeq("parent")
+    opened: dict[str, LogSeq] = {}
+
+    def factory(run_id: str, conversation_id: str, tenant_id: str) -> LogSeq:
+        _ = (conversation_id, tenant_id)
+        seq = LogSeq(run_id)
+        opened[run_id] = seq
+        return seq
+
+    made = {"n": 0}
+
+    def llm_factory() -> ScriptedLLM:
+        made["n"] += 1
+        if made["n"] == 1:
+            return ScriptedLLM(
+                [
+                    TurnResult(
+                        tool_calls=[
+                            ToolCall(
+                                id="g1",
+                                name="spawn_subagent",
+                                arguments=json.dumps(_spawn_args("beta", description="chart the bar")),
+                            )
+                        ]
+                    ),
+                    TurnResult(content="child conclusion"),
+                ]
+            )
+        return ScriptedLLM([TurnResult(content="grand conclusion")])
+
+    async def publish(_payload: dict) -> None:
+        return None
+
+    supervisor = Supervisor(publish_wake=publish, llm_factory=llm_factory)
+    supervisor.bind_events(factory)
+    ws = await _session(tmp_path, supervisor)
+    tool = supervisor.spawn_tool("conv_1", 0, parent_emitter=parent)
+    out = await tool(_spawn_args("alpha", description="check the harbor"))
+    assert "status=running" in out
+    await supervisor.settle()
+
+    started = next(payload for typ, payload in parent.events if typ == "subagent.started")
+    child_run = started["child_run_id"]
+    assert started["subagent_id"] == "alpha"
+    assert started["depth"] == 1
+    assert "parent_subagent_id" not in started
+    child = opened[child_run]
+    grand_started = next(payload for typ, payload in child.events if typ == "subagent.started")
+    assert grand_started["subagent_id"] == "beta"
+    assert grand_started["parent_subagent_id"] == "alpha"
+    grand = opened[grand_started["child_run_id"]]
+
+    def first(name: str, typ: str) -> int:
+        for i, item in enumerate(order):
+            if item == (name, typ):
+                return i
+        raise AssertionError(f"missing {name} {typ}")
+
+    assert first("parent", "subagent.started") < first(child_run, "run.started")
+    assert first(child_run, "subagent.started") < first(grand.name, "run.started")
+    assert not any(name == "parent" and typ == "text_delta" for name, typ in order)
+    parent_starts = [payload for typ, payload in parent.events if typ == "subagent.started"]
+    assert len(parent_starts) == 1
+
+    child_text = "".join(str(payload.get("delta") or "") for typ, payload in child.events if typ == "text_delta")
+    grand_text = "".join(str(payload.get("delta") or "") for typ, payload in grand.events if typ == "text_delta")
+    assert child_text == await ws.read_text(report_path("alpha")) == "child conclusion"
+    assert grand_text == await ws.read_text(report_path("beta")) == "grand conclusion"
+    assert "spawn_subagent" not in await ws.read_text(report_path("alpha"))

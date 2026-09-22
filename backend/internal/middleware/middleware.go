@@ -90,6 +90,11 @@ func Auth(auth *service.Auth) gin.HandlerFunc {
 
 func RateLimit(r *cache.Redis, perMin int) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			c.Next()
+			return
+		}
 		p, err := tenant.FromContext(c.Request.Context())
 		if err != nil {
 			c.Next()

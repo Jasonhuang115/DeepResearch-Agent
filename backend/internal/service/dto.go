@@ -23,13 +23,13 @@ type RunView struct {
 }
 
 type MessageView struct {
-	ID             string            `json:"id"`
-	ConversationID string            `json:"conversation_id"`
-	RunID          *string           `json:"run_id,omitempty"`
-	Role           string            `json:"role"`
-	Content        string            `json:"content"`
-	Attachments    []AttachmentView  `json:"attachments,omitempty"`
-	CreatedAt      string            `json:"created_at"`
+	ID             string           `json:"id"`
+	ConversationID string           `json:"conversation_id"`
+	RunID          *string          `json:"run_id,omitempty"`
+	Role           string           `json:"role"`
+	Content        string           `json:"content"`
+	Attachments    []AttachmentView `json:"attachments,omitempty"`
+	CreatedAt      string           `json:"created_at"`
 }
 
 type AttachmentView struct {
@@ -76,6 +76,36 @@ func msgView(m model.Message, convPublic string, runPublic *string, atts []model
 		}
 	}
 	return v
+}
+
+type SubagentView struct {
+	ID          string  `json:"id"`
+	RunID       string  `json:"run_id"`
+	ParentRunID string  `json:"parent_run_id"`
+	ParentID    *string `json:"parent_id"`
+	Description string  `json:"description"`
+	Status      string  `json:"status"`
+	Depth       int     `json:"depth"`
+}
+
+func subagentView(row model.Run, parentPublic string) SubagentView {
+	id := ""
+	if row.SubagentID != nil {
+		id = *row.SubagentID
+	}
+	desc := ""
+	if row.Description != nil {
+		desc = *row.Description
+	}
+	return SubagentView{
+		ID:          id,
+		RunID:       row.PublicID,
+		ParentRunID: parentPublic,
+		ParentID:    row.ParentSubagentID,
+		Description: desc,
+		Status:      row.Status,
+		Depth:       row.Depth,
+	}
 }
 
 func runView(r model.Run, convPublic string) RunView {

@@ -40,6 +40,21 @@ func (s *Sweeper) tick(ctx context.Context) {
 		slog.Warn("sweeper list", "err", err)
 	} else {
 		for _, run := range runs {
+			if run.Kind == model.RunKindSubagent {
+				continue
+			}
+			s.fail(ctx, run)
+		}
+	}
+	orphanAfter := s.Cfg.SubagentOrphan
+	if orphanAfter <= 0 {
+		orphanAfter = 2 * time.Hour
+	}
+	orphans, err := s.Repo.OrphanSubagentRuns(ctx, now.Add(-orphanAfter))
+	if err != nil {
+		slog.Warn("sweeper subagent list", "err", err)
+	} else {
+		for _, run := range orphans {
 			s.fail(ctx, run)
 		}
 	}
