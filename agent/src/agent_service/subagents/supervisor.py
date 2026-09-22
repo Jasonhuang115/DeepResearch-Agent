@@ -4,12 +4,14 @@ import asyncio
 import logging
 import math
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from agent_service.config import settings
+from agent_service.observability.tracing import build_tracer
 from agent_service.sources.ledger import SourceLedger
 from agent_service.subagents.report import ReportSink, report_path, spec_path, write_status
 from agent_service.tools import default_registry
@@ -80,6 +82,7 @@ class Session:
     conversation_id: str
     tenant_id: str = ""
     user_id: str = ""
+    parent_run_id: str = ""
     workspace: Workspace | None = None
     ledger: SourceLedger | None = None
     searcher: Any = None
@@ -131,6 +134,7 @@ class Supervisor:
         conversation_id: str,
         tenant_id: str = "",
         user_id: str = "",
+        parent_run_id: str = "",
         workspace: Workspace | None = None,
         ledger: SourceLedger | None = None,
         searcher: Any = None,
@@ -145,6 +149,8 @@ class Supervisor:
             current.tenant_id = tenant_id
         if user_id:
             current.user_id = user_id
+        if parent_run_id:
+            current.parent_run_id = parent_run_id
         if workspace is not None:
             current.workspace = workspace
         if ledger is not None:
@@ -303,22 +309,43 @@ class Supervisor:
                 log.warning("subagent keepalive failed", exc_info=True)
 
     async def _drive(self, job: Job) -> None:
+        tracer = build_tracer()
+        session = self._sessions.get(job.conversation_id)
+        started = time.perf_counter()
         status = "failed"
-        try:
-            sink = ReportSink(self._workspace(job), job.sub_id)
-            await self._run_bounded(job, sink)
-            status = _terminal_status(job, sink.status)
-        except asyncio.CancelledError:
-            job.suppress_wake = True
-            job.cancel.set()
-            status = "cancelled"
-        except Exception:
-            log.exception("subagent %s failed", job.sub_id)
-            status = _terminal_status(job, "failed")
+        with tracer.trace(
+            f"subagent.{job.sub_id}",
+            thread_id=job.conversation_id,
+            metadata={
+                "subagent_id": job.sub_id,
+                "parent_run_id": session.parent_run_id if session is not None else "",
+                "conversation_id": job.conversation_id,
+                "depth": job.depth,
+                "run_id": job.run_id,
+            },
+        ) as span:
+            try:
+                sink = ReportSink(self._workspace(job), job.sub_id)
+                await self._run_bounded(job, sink, tracer)
+                status = _terminal_status(job, sink.status)
+            except asyncio.CancelledError:
+                job.suppress_wake = True
+                job.cancel.set()
+                status = "cancelled"
+            except Exception:
+                log.exception("subagent %s failed", job.sub_id)
+                status = _terminal_status(job, "failed")
+            finally:
+                span.annotate(
+                    status=status,
+                    depth=job.depth,
+                    turns=tracer.current_turns(),
+                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                )
         await self._finish(job, status)
 
-    async def _run_bounded(self, job: Job, sink: ReportSink) -> None:
-        work = asyncio.create_task(self._loop(job, sink), name=f"subagent-loop-{job.sub_id}")
+    async def _run_bounded(self, job: Job, sink: ReportSink, tracer: Any) -> None:
+        work = asyncio.create_task(self._loop(job, sink, tracer), name=f"subagent-loop-{job.sub_id}")
         try:
             await asyncio.wait_for(asyncio.shield(work), timeout=job.max_time)
         except TimeoutError:
@@ -342,7 +369,7 @@ class Supervisor:
                 pass
             raise
 
-    async def _loop(self, job: Job, sink: ReportSink) -> None:
+    async def _loop(self, job: Job, sink: ReportSink, tracer: Any) -> None:
         session = self._sessions.get(job.conversation_id)
         workspace = session.workspace if session is not None else None
         if workspace is None:
@@ -374,6 +401,7 @@ class Supervisor:
             cancel=job.cancel,
             max_turns=None,
             max_report_chars=settings.max_report_chars,
+            tracer=tracer,
         )
 
     def _registry(

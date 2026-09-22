@@ -8,6 +8,7 @@ from typing import Any
 
 from agent_service.sources.catalog import IndexEntry, load_index, render_catalog_chapter
 from agent_service.workspace.protocol import Workspace
+from research_engine.trace import NullTracer, usage_dict
 from research_engine.types import EventEmitter, LLMClient, TurnResult
 
 log = logging.getLogger("agent_service.context")
@@ -140,6 +141,7 @@ class ContextPacker:
     workspace: Workspace | None = None
     seq: EventEmitter | None = None
     budget: int = 100_000
+    tracer: Any | None = None
 
     async def __call__(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         system, blocks = split_pair_blocks(messages)
@@ -147,32 +149,43 @@ class ContextPacker:
         if plan is None:
             return list(messages)
         dropped, kept = plan
-        material = [m for block in dropped for m in block]
-        catalog = await self._catalog()
-        allowed = {e.id for e in catalog}
-        try:
-            llm_text = await self._summarize(material, allowed)
-        except Exception:
-            log.exception("compact llm failed; leaving window unchanged")
-            return list(messages)
-        summary = _assemble_summary(llm_text, catalog, allowed)
-        await self._write_memory(summary)
-        out = list(system)
-        out.append({"role": "user", "content": f"<summary>\n{summary}\n</summary>"})
-        for block in kept:
-            out.extend(block)
-        if self.seq is not None:
-            await self.seq.emit(
-                "context.compacted",
-                {
-                    "dropped_messages": sum(len(b) for b in dropped),
-                    "kept_messages": len(out),
-                    "tokens_before": window_tokens(messages),
-                    "tokens_after": window_tokens(out),
-                },
+        tracer = self.tracer or NullTracer()
+        with tracer.span("compress") as span:
+            material = [m for block in dropped for m in block]
+            catalog = await self._catalog()
+            allowed = {e.id for e in catalog}
+            dropped_messages = sum(len(b) for b in dropped)
+            try:
+                llm_text = await self._summarize(material, allowed)
+            except Exception:
+                log.exception("compact llm failed; leaving window unchanged")
+                span.annotate(dropped_messages=dropped_messages, error="compact failed")
+                return list(messages)
+            summary = _assemble_summary(llm_text, catalog, allowed)
+            await self._write_memory(summary)
+            out = list(system)
+            out.append({"role": "user", "content": f"<summary>\n{summary}\n</summary>"})
+            for block in kept:
+                out.extend(block)
+            tokens_before = window_tokens(messages)
+            tokens_after = window_tokens(out)
+            span.annotate(
+                dropped_messages=dropped_messages,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
             )
-        messages[:] = out
-        return messages
+            if self.seq is not None:
+                await self.seq.emit(
+                    "context.compacted",
+                    {
+                        "dropped_messages": dropped_messages,
+                        "kept_messages": len(out),
+                        "tokens_before": tokens_before,
+                        "tokens_after": tokens_after,
+                    },
+                )
+            messages[:] = out
+            return messages
 
     async def _catalog(self) -> list[IndexEntry]:
         if self.workspace is None:
@@ -196,6 +209,9 @@ class ContextPacker:
             [],
             tool_choice="none",
         )
+        usage = usage_dict(result)
+        if usage is not None:
+            (self.tracer or NullTracer()).add_usage(usage["prompt_tokens"], usage["completion_tokens"])
         text = (result.content or "").strip()
         return text or _fallback_summary(material)
 

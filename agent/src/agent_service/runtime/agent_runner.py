@@ -6,6 +6,7 @@ from typing import Any
 
 from agent_service.config import settings
 from agent_service.context import ContextPacker, pack_messages
+from agent_service.observability.tracing import build_tracer
 from agent_service.durable import bind_workspace, build_durable_store
 from agent_service.runtime.system_prompt import build_system_prompt, detect_reply_language
 from agent_service.sources.ingest import ingest_attachments
@@ -48,6 +49,17 @@ def _llm_extra_body() -> dict[str, Any] | None:
     return extra or None
 
 
+class _StatusTap:
+    def __init__(self, inner: EventEmitter) -> None:
+        self._inner = inner
+        self.status = ""
+
+    async def emit(self, typ: str, payload: dict | None = None) -> None:
+        if typ == "run.finished":
+            self.status = str((payload or {}).get("status") or "")
+        await self._inner.emit(typ, payload)
+
+
 async def run_research(
     cmd: dict,
     seq: EventEmitter,
@@ -61,6 +73,55 @@ async def run_research(
     fetcher: Any | None = None,
     durable_store: Any | None = None,
     supervisor: Supervisor | None = None,
+    tracer: Any | None = None,
+) -> None:
+    active = tracer if tracer is not None else build_tracer()
+    conversation_id = str(cmd.get("conversation_id") or "")
+    tap = _StatusTap(seq)
+    with active.trace(
+        "run",
+        thread_id=conversation_id,
+        metadata={
+            "run_id": str(cmd.get("run_id") or ""),
+            "conversation_id": conversation_id,
+            "tenant_id": str(cmd.get("tenant_id") or ""),
+        },
+    ) as run_span:
+        try:
+            await _execute(
+                cmd,
+                tap,
+                cancel,
+                llm=llm,
+                tools=tools,
+                max_turns=max_turns,
+                workspace_provider=workspace_provider,
+                searcher=searcher,
+                fetcher=fetcher,
+                durable_store=durable_store,
+                supervisor=supervisor,
+                tracer=active,
+                run_span=run_span,
+            )
+        finally:
+            run_span.annotate(status=tap.status or "failed")
+
+
+async def _execute(
+    cmd: dict,
+    seq: EventEmitter,
+    cancel: Any,
+    *,
+    llm: LLMClient | None = None,
+    tools: ToolRegistry | None = None,
+    max_turns: int | None = None,
+    workspace_provider: WorkspaceProvider | None = None,
+    searcher: Searcher | None = None,
+    fetcher: Any | None = None,
+    durable_store: Any | None = None,
+    supervisor: Supervisor | None = None,
+    tracer: Any,
+    run_span: Any | None = None,
 ) -> None:
     limit = settings.max_turns if max_turns is None else max_turns
     question = ((cmd.get("request") or {}).get("content") or "").strip()
@@ -77,6 +138,8 @@ async def run_research(
 
     if llm is None:
         if not settings.openai_api_key:
+            if run_span is not None:
+                run_span.annotate(model=settings.openai_model)
             await seq.emit("run.started", {"model": settings.openai_model})
             await seq.emit("error", {"message": MISSING_KEY})
             await seq.emit("message.completed", {"content": "", "truncated": False})
@@ -151,6 +214,7 @@ async def run_research(
             searcher=searcher,
             fetcher=fetcher,
             store=sandbox_store,
+            parent_run_id=str(cmd.get("run_id") or ""),
         )
         registry.register(
             "spawn_subagent",
@@ -165,6 +229,8 @@ async def run_research(
 
     manifest = ""
     model = getattr(llm, "model", None) or settings.openai_model
+    if run_span is not None:
+        run_span.annotate(model=model)
     await seq.emit("run.started", {"model": model})
     if workspace is not None and ledger is not None:
         manifest = await ingest_attachments(cmd, workspace, ledger)
@@ -174,6 +240,7 @@ async def run_research(
         workspace=workspace,
         seq=seq,
         budget=settings.context_input_budget,
+        tracer=tracer,
     )
     messages = _chat_messages(
         cmd,
@@ -198,6 +265,7 @@ async def run_research(
             max_turns=limit,
             max_report_chars=settings.max_report_chars,
             prepare_messages=packer,
+            tracer=tracer,
         )
     finally:
         keep_stop.set()

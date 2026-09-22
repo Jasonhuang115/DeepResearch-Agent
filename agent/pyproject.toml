@@ -8,6 +8,7 @@ dependencies = [
   "fastapi>=0.115",
   "httpx>=0.28",
   "openai>=1.60",
+  "opik>=2.2.73",
   "pypdf>=5.0",
   "python-docx>=1.1",
   "uvicorn[standard]>=0.32",

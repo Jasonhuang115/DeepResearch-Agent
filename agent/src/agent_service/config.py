@@ -43,6 +43,10 @@ class Settings:
     oss_bucket: str = os.getenv("OSS_BUCKET", "")
     oss_endpoint: str = os.getenv("OSS_ENDPOINT", "")
     oss_prefix: str = os.getenv("OSS_PREFIX", "tenants/")
+    opik_api_key: str = os.getenv("OPIK_API_KEY", "").strip() or os.getenv("Opik_key", "").strip()
+    opik_workspace: str = os.getenv("OPIK_WORKSPACE", "").strip() or "jasonhuang115"
+    opik_project_name: str = os.getenv("OPIK_PROJECT_NAME", "").strip() or "deep-research"
+    opik_url_override: str = os.getenv("OPIK_URL_OVERRIDE", "").strip()
 
 
 def resolve_upload_dir(raw: str | None = None) -> Path:

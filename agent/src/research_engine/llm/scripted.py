@@ -45,4 +45,9 @@ class ScriptedLLM:
         if on_delta and turn.content and not turn.tool_calls:
             await on_delta(turn.content)
         reason = turn.finish_reason or ("tool_calls" if turn.tool_calls else "stop")
-        return TurnResult(content=turn.content, tool_calls=turn.tool_calls, finish_reason=reason)
+        return TurnResult(
+            content=turn.content,
+            tool_calls=turn.tool_calls,
+            finish_reason=reason,
+            usage=turn.usage,
+        )

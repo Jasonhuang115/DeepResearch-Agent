@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from agent_service.envfile import load_repo_env
+
+# Settings reads the environment when its module is imported.
+load_repo_env()
+
 import asyncio
 import logging
 

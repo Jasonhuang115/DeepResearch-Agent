@@ -6,7 +6,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from research_engine.types import ToolCall, TurnResult
+from research_engine.types import TokenUsage, ToolCall, TurnResult
 
 
 def _delta_reasoning(delta: Any) -> str:
@@ -59,17 +59,22 @@ class OpenAICompatLLM:
             kwargs["tool_choice"] = tool_choice
         if self._extra_body:
             kwargs["extra_body"] = self._extra_body
+        kwargs["stream_options"] = {"include_usage": True}
 
         stream = await self._client.chat.completions.create(**kwargs)
         content_parts: list[str] = []
         tool_acc: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
         saw_tools = False
+        usage: TokenUsage | None = None
         try:
             async for chunk in stream:
                 if cancel is not None and cancel.is_set():
                     finish_reason = finish_reason or "cancelled"
                     break
+                parsed = _usage_from(chunk)
+                if parsed is not None:
+                    usage = parsed
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
@@ -116,4 +121,22 @@ class OpenAICompatLLM:
             content="".join(content_parts),
             tool_calls=calls,
             finish_reason=finish_reason,
+            usage=usage,
         )
+
+
+def _usage_from(chunk: Any) -> TokenUsage | None:
+    raw = getattr(chunk, "usage", None)
+    if raw is None and isinstance(chunk, dict):
+        raw = chunk.get("usage")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        prompt = raw.get("prompt_tokens")
+        completion = raw.get("completion_tokens")
+    else:
+        prompt = getattr(raw, "prompt_tokens", None)
+        completion = getattr(raw, "completion_tokens", None)
+    if prompt is None and completion is None:
+        return None
+    return TokenUsage(prompt_tokens=int(prompt or 0), completion_tokens=int(completion or 0))

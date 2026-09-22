@@ -4,10 +4,12 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from research_engine.completion import FinishKind, normalize_finish
+from research_engine.trace import NullTracer, result_overflowed, tool_input, usage_dict
 from research_engine.types import EventEmitter, LLMClient, ToolBox, ToolCall, TurnResult
 
 log = logging.getLogger("research_engine.loop")
@@ -28,10 +30,12 @@ async def run_loop(
         [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
     ]
     | None = None,
+    tracer: Any | None = None,
 ) -> None:
     notes: list[str] = []
     openai_tools = tools.openai_tools()
     prepare = prepare_messages or (lambda m: m)
+    trace = tracer or NullTracer()
 
     try:
         turn = 0
@@ -54,6 +58,7 @@ async def run_loop(
                 tool_choice="auto",
                 max_report_chars=max_report_chars,
                 prepare=prepare,
+                tracer=trace,
             )
             if done:
                 return
@@ -63,9 +68,20 @@ async def run_loop(
         if cancel.is_set():
             await _finish(seq, "cancelled", _partial(notes), "cancelled")
             return
-        result = await _complete(
-            llm, messages, openai_tools, "none", cancel, seq, max_turns + 1, notes, prepare
-        )
+        trace.add_turn()
+        with trace.span("turn", turn=max_turns + 1):
+            result = await _complete(
+                llm,
+                messages,
+                openai_tools,
+                "none",
+                cancel,
+                seq,
+                max_turns + 1,
+                notes,
+                prepare,
+                tracer=trace,
+            )
         if result is None:
             return
         await _handle_final(seq, result, cancel, notes, max_report_chars, streamed=False)
@@ -90,6 +106,42 @@ async def _step(
     prepare: Callable[
         [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
     ],
+    tracer: Any,
+) -> bool:
+    tracer.add_turn()
+    with tracer.span("turn", turn=turn):
+        return await _step_body(
+            llm,
+            tools,
+            openai_tools,
+            messages,
+            seq,
+            cancel,
+            notes,
+            turn=turn,
+            tool_choice=tool_choice,
+            max_report_chars=max_report_chars,
+            prepare=prepare,
+            tracer=tracer,
+        )
+
+
+async def _step_body(
+    llm: LLMClient,
+    tools: ToolBox,
+    openai_tools: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    seq: EventEmitter,
+    cancel: asyncio.Event,
+    notes: list[str],
+    *,
+    turn: int,
+    tool_choice: str,
+    max_report_chars: int,
+    prepare: Callable[
+        [list[dict[str, Any]]], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
+    ],
+    tracer: Any,
 ) -> bool:
     streamed: list[str] = []
 
@@ -112,6 +164,7 @@ async def _step(
         prepare,
         on_delta=on_delta,
         on_reasoning=on_reasoning,
+        tracer=tracer,
     )
     if result is None:
         return True
@@ -137,7 +190,7 @@ async def _step(
             notes.append(result.content)
             if not streamed:
                 await _delta(seq, "reasoning_delta", result.content)
-        cancelled = await _run_tools(tools, result, messages, seq, cancel, notes)
+        cancelled = await _run_tools(tools, result, messages, seq, cancel, notes, tracer)
         return cancelled
     await _handle_final(
         seq,
@@ -165,6 +218,7 @@ async def _complete(
     ],
     on_delta: Any = None,
     on_reasoning: Any = None,
+    tracer: Any | None = None,
 ) -> TurnResult | None:
     await seq.emit("run.progress", {"turn": turn, "note": "thinking"})
     window = prepare(messages)
@@ -174,14 +228,28 @@ async def _complete(
     async def emit_reasoning(piece: str) -> None:
         await seq.emit("reasoning_delta", {"delta": piece})
 
-    result = await llm.complete(
-        window,
-        openai_tools,
-        tool_choice=tool_choice,
-        cancel=cancel,
-        on_delta=on_delta,
-        on_reasoning=on_reasoning or emit_reasoning,
-    )
+    trace = tracer or NullTracer()
+    model = getattr(llm, "model", None) or ""
+    with trace.span("llm") as span:
+        result = await llm.complete(
+            window,
+            openai_tools,
+            tool_choice=tool_choice,
+            cancel=cancel,
+            on_delta=on_delta,
+            on_reasoning=on_reasoning or emit_reasoning,
+        )
+        usage = usage_dict(result)
+        if usage is not None:
+            trace.add_usage(usage["prompt_tokens"], usage["completion_tokens"])
+        span.annotate(
+            model=model,
+            finish_reason=result.finish_reason,
+            message_count=len(window),
+            output_chars=len(result.content or ""),
+            tool_names=[call.name for call in result.tool_calls],
+            usage=usage,
+        )
     if cancel.is_set():
         await _finish(seq, "cancelled", _partial(notes), "cancelled")
         return None
@@ -195,6 +263,7 @@ async def _run_tools(
     seq: EventEmitter,
     cancel: asyncio.Event,
     notes: list[str],
+    tracer: Any,
 ) -> bool:
     messages.append(
         {
@@ -210,7 +279,7 @@ async def _run_tools(
             ],
         }
     )
-    rows = await asyncio.gather(*[_invoke(tools, call, seq, cancel) for call in result.tool_calls])
+    rows = await asyncio.gather(*[_invoke(tools, call, seq, cancel, tracer) for call in result.tool_calls])
     for call, _ok, text in rows:
         messages.append({"role": "tool", "tool_call_id": call.id, "content": text})
     if cancel.is_set():
@@ -224,28 +293,51 @@ async def _invoke(
     call: ToolCall,
     seq: EventEmitter,
     cancel: asyncio.Event,
+    tracer: Any,
 ) -> tuple[ToolCall, bool, str]:
     args = _parse_args(call.arguments)
+    started = time.perf_counter()
+    with tracer.span(f"tool.{call.name}") as span:
+        row, attempted = await _invoke_call(tools, call, args, seq, cancel)
+        if call.name == "web_search" and attempted:
+            tracer.add_search()
+        span.annotate(
+            ok=row[1],
+            result_chars=len(row[2]),
+            overflowed=result_overflowed(row[2]),
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            input=tool_input(call.name, args),
+        )
+        return row
+
+
+async def _invoke_call(
+    tools: ToolBox,
+    call: ToolCall,
+    args: dict[str, Any],
+    seq: EventEmitter,
+    cancel: asyncio.Event,
+) -> tuple[tuple[ToolCall, bool, str], bool]:
     await seq.emit(
         "tool_call.started",
         {"tool_call_id": call.id, "name": call.name, "args": args},
     )
     if cancel.is_set():
         await seq.emit("tool_call.finished", {"tool_call_id": call.id, "ok": False, "summary": "cancelled"})
-        return call, False, "cancelled"
+        return (call, False, "cancelled"), False
 
     fn = tools.get(call.name)
     if fn is None:
         err = f"unknown tool: {call.name}"
         await seq.emit("tool_call.finished", {"tool_call_id": call.id, "ok": False, "summary": err})
-        return call, False, err
+        return (call, False, err), False
 
     try:
         text = await fn(args)
     except Exception as exc:  # noqa: BLE001
         err = str(exc)
         await seq.emit("tool_call.finished", {"tool_call_id": call.id, "ok": False, "summary": err})
-        return call, False, err
+        return (call, False, err), True
 
     after = getattr(tools, "after_result", None)
     if after is not None:
@@ -256,10 +348,10 @@ async def _invoke(
 
     if cancel.is_set():
         await seq.emit("tool_call.finished", {"tool_call_id": call.id, "ok": False, "summary": "cancelled"})
-        return call, False, "cancelled"
+        return (call, False, "cancelled"), True
 
     await seq.emit("tool_call.finished", {"tool_call_id": call.id, "ok": True, "summary": text[:180]})
-    return call, True, text
+    return (call, True, text), True
 
 
 async def _handle_final(

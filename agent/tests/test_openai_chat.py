@@ -112,6 +112,29 @@ async def test_openai_sends_thinking_extra_body(monkeypatch: pytest.MonkeyPatch)
     await llm.complete([{"role": "user", "content": "q"}], [])
     assert captured["model"] == "deepseek-flash"
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+    assert captured["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_openai_reads_usage_from_chunk_without_choices(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    chunks = [
+        _chunk(content="hi"),
+        SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7)),
+    ]
+    llm = OpenAILLM(api_key="sk-test", model="gpt-4.1-mini")
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _Stream(chunks)
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
+    result = await llm.complete([{"role": "user", "content": "q"}], [])
+    assert result.content == "hi"
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == 11
+    assert result.usage.completion_tokens == 7
+    assert captured["stream_options"] == {"include_usage": True}
 
 
 def async_append(parts: list[str]):

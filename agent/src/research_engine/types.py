@@ -14,10 +14,17 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+@dataclass(frozen=True)
 class TurnResult:
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str | None = None
+    usage: TokenUsage | None = None
 
 
 class LLMClient(Protocol):
