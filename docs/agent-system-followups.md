@@ -1,9 +1,9 @@
 # Agent 系统后续待做的 feature
 
-Date: 2026-09-22
-Status: 第 1–4 节和第 11.1 节已落地（search/fetch/上传、四章压缩、OSS 文件记忆、异步 subagent、Opik 开发 trace）。第 14.1–14.4 已做。其余仍是 backlog。绑定加固（Redis/本地路径带 tenant、禁止 `tenants/default/`）见第 3.3 节。
+Date: 2026-09-27
+Status: 第 1–4 节和第 11.1 节已落地（search/fetch/上传、四章压缩、OSS 文件记忆、异步 subagent、Opik 开发 trace）。第 14.1–14.4 已做（含 Edit / Glob / Grep）。其余仍是 backlog。绑定加固（Redis/本地路径带 tenant、禁止 `tenants/default/`）见第 3.3 节。新的待做是第 15–17 节：JEV 优化记忆、长程 hooks、可恢复 checkpoint。
 
-当前已有：`research_engine` loop、真实 `web_search`/`web_fetch`、来源账本、用户上传、Read/Write/Bash（本地或 E2B）、overflow、会话 OSS 前缀、沙箱 hydrate、7 天前缀 GC、开发用 Opik trace（有 key 才上报；没有 key 或上报失败都不挡 run）。
+当前已有：`research_engine` loop、真实 `web_search`/`web_fetch`、来源账本、用户上传、Read/Write/Edit/Glob/Grep/Bash（本地或 E2B）、overflow、会话 OSS 前缀、沙箱 hydrate、7 天前缀 GC、开发用 Opik trace（有 key 才上报；没有 key 或上报失败都不挡 run）。
 
 相关文档：
 
@@ -195,6 +195,8 @@ Supervisor 挂在 agent Runtime 上，生命周期长过单次主 run，并在�
 
 待敲定：JEV 是独立小模型还是 prompt 分类；拆分失败时是否回退纯 ReAct；这些策略是硬编码编排还是模型可读的 playbook。
 
+记忆侧怎么用 JEV 决定记什么、下一轮先读什么，见第 15 节。本节仍是进 loop 前的研究策略，未做。
+
 ---
 
 ## 6. Plan 模式
@@ -280,7 +282,7 @@ skills/
 
 ### 8.1 要不要做
 
-建议：**协议先设计，实现后置。** 本产品作为可被调用的研究模块是有价值的（给 IDE agent、工作流引擎、另一个会话里的编排器），但当前连真实 search 都没有，先暴露 A2A 等于把半成品当 API。
+建议：**协议先设计，实现后置。** 本产品作为可被调用的研究模块是有价值的（给 IDE agent、工作流引擎、另一个会话里的编排器）。search / fetch 已经有了，A2A 仍后置：先补身份、取消、多租户、计费，再暴露给别的 agent。
 
 三种接入深度：
 
@@ -509,6 +511,8 @@ Web + Bash + 以后的 browser，攻击面主要是「模型把不可信网页�
 6. **澄清模式**（禁搜追问 → `brief.md`）再接 Plan + 中途 HITL
 7. 无头渲染 / 白名单 browser（fetch 诚实失败不够用再上）
 8. 意图拆分、Computer use 全量、定时 watch、A2A
+9. 第 15 节：用 JEV 优化记忆（记什么、下一轮先读什么）。不改第 3 节的 OSS 真源
+10. 第 16–17 节：长程 hooks，再在 hook 点写可恢复 checkpoint。和第 2.1 节摘要里的 Done 短 checkpoint 分开
 
 ---
 
@@ -516,30 +520,25 @@ Web + Bash + 以后的 browser，攻击面主要是「模型把不可信网页�
 
 **状态：** 14.1 工作区、14.2 真搜索、14.3 触顶续写、14.4 压缩已做。
 
-**问题：** 问答 loop 已经能跑。工作区、真搜索、触顶续写、上下文压缩都已补上。下面各小节保留当时的缺口说明。
+**问题：** 问答 loop 已经能跑。工作区、真搜索、触顶续写、上下文压缩都已补上。14.1–14.4 记的是已经补上的行为。14.1 里 TodoWrite、产物下载、会话删除时是否 destroy 沙箱仍未做。
 
 挂钩已经在代码里：`default_registry()`、`prepare_messages()`（配对安全摘要压缩）、`FinishKind.OUTPUT_LIMIT`（纯文本续写，截断的 tool call 整段重生成）。不要再抽一层空的 Sandbox Protocol。
 
 ### 14.1 工作区，让 Read / Write / Bash 真正执行
 
-现在三把工具返回 `… is not implemented yet`，禁止在 Agent 宿主机 `subprocess` / 写盘。
+**状态：done。** 会话工作区已接上。`AGENT_WORKSPACE` 默认 `auto`：有 `E2B_API_KEY` 用 E2B，否则用本地目录。同一套 `read` / `write` / `bash`。`Read` / `Write` / `Edit` / `Glob` / `Grep` / `Bash` 已注册，prompt 里不再写「未实现」。密钥不进沙箱。Bash 禁网，出网只走 search/fetch。loop、prompt 组装、Kafka 契约没改。
 
-拟定：
+Redis 仍是 `sandbox:{conversation_id}`（带租户的键见第 3.3 节，未做）。ensure / keepalive / 重建失败会告诉模型上一轮工作区丢了。
 
-- 会话级工作区（架构稿的 E2B；本地可用目录降级，接口同一套 `read` / `write` / `bash`）。
-- 只改 [`fs.py`](../agent/src/agent_service/tools/fs.py) / [`bash.py`](../agent/src/agent_service/tools/bash.py) 的函数体和 [`02-primitives.md`](../agent/src/agent_service/prompts/02-primitives.md) 里「未实现」的句子。loop、prompt 组装、Kafka 契约不动。
-- Redis 记 sandbox 映射（现状 `sandbox:{conversation_id}`；带租户的键见第 3.3 节）；ensure / keepalive / 重建失败要告诉模型「上一轮工作区丢了」。
-- 密钥不进沙箱。Bash 禁网；出网只走 search/fetch。
+仍未做：
 
-可顺带注册、本轮没挂上的文件原语：`Glob` / `Grep` / `Edit`。`TodoWrite` 整表替换 + 透传 `todo.updated`（Go 只存转发）。
-
-Go `AGENT_BASE_URL` 反代 `GET /v1/runs/{run_id}/artifacts/{path}`：本轮 FastAPI 仍只有 health，产物下载留到有工作区之后。事件 `artifact.ready` 同样届时再加。
-
-待敲定：E2B vs 本机目录谁默认；会话删除是否 destroy 沙箱。
+- `TodoWrite` 整表替换 + 透传 `todo.updated`（Go 只存转发）。
+- Go `AGENT_BASE_URL` 反代 `GET /v1/runs/{run_id}/artifacts/{path}`，以及事件 `artifact.ready`。FastAPI 仍只有 health。
+- 会话删除时是否 destroy 沙箱。OSS 前缀 GC 已在第 2.3 节。
 
 ### 14.2 真搜索与 fetch
 
-见第 1 节。本轮 [`web_search.py`](../agent/src/agent_service/tools/web_search.py) 仍返回电解质 mock，prompt 已写明不可当证据。上 Tavily / `web_fetch` / 来源账本时不要改 `research_engine.loop`。
+**状态：done。** 见第 1 节。生产 Tavily + `web_fetch` + 来源账本；`mock` 只留给测试。`research_engine.loop` 没改。
 
 ### 14.3 输出触顶续写
 
@@ -560,3 +559,52 @@ Go `AGENT_BASE_URL` 反代 `GET /v1/runs/{run_id}/artifacts/{path}`：本轮 Fas
 - 无工作区时的 Sandbox Protocol。
 - 把聊天 HTTP 或 SSE 做到 Agent FastAPI 上。
 - 用 A2A / MCP 替换现有 Kafka 命令通道。
+
+---
+
+## 15. 用 JEV 优化记忆
+
+**状态：backlog。** 第 3 节的文件夹记忆已落地。本节决定记什么、下一轮先读什么。不改成向量库，也不换 OSS 真源。
+
+**问题：** 压缩器现在机械填四章，模型自己 Edit `memory/notes.md`。长程里要么把过程都写进 findings，要么压完只剩目录，下一轮不知道该翻哪份来源。第 5 节的 JEV 写的是进 loop 前的意图分类，还没接到记忆上。
+
+要做：
+
+- 压缩前和下一轮开始前，用 JEV（或同类分类器）看当前意图：事实核查 / 对比 / 综述 / 跟踪时效。
+- 按意图决定写哪一份：已核实的进 `memory/findings.md`，未决留在 `memory/open-questions.md`，下一轮必须先 Read 的路径单独列出。
+- 分类失败就退回现在的四章压缩，不挡 run。
+
+待敲定：JEV 是独立小模型还是 prompt 分类（与第 5 节同一处拍板）；意图和「该读的路径」写进摘要 Continue，还是另写 `memory/next.md`。
+
+---
+
+## 16. 长程稳定性：埋 hooks
+
+**状态：backlog。**
+
+**问题：** 长研究会漂：同一角度空转、忘掉 Goal、工具失败后当成成功继续写。现在只有上下文预算、`max_time` 和压缩。loop 上没有固定点可以插入检查。
+
+要做：在现有 loop 上埋少量 hooks，不另包一层 runner。回调点：
+
+- 每轮开始：对照 Goal / Continue。偏了就把原目标塞回本轮上下文。
+- 工具返回后：失败、空结果、重复 query 记一笔，禁止当成成功摘要。
+- 压缩前：先按第 15 节抽记忆，再压四章。
+- 空转：连续若干轮没有新 `source_id`、开放问题也不减少，就收束或改派，而不是耗到轮次上限。
+
+待敲定：hook 是代码回调还是可读 playbook；哪些只打第 11.1 节的 trace，哪些可以改下一轮 messages。
+
+---
+
+## 17. 可恢复 checkpoint
+
+**状态：backlog。** 和第 2.1 节摘要里的「Done 短 checkpoint」分开。那里是压缩章节里的一句已完成小结。这里是长程 run 死后能接着跑的进度点。
+
+**问题：** 进程重启后，正在跑的主 loop 和子任务不会恢复（第 4.3 节）。磁盘上的报告还在，没有「从哪一步接着跑」。
+
+要做：
+
+- 在第 16 节的 hook 点把可恢复状态写到会话前缀，例如 `checkpoint.json`：Goal、未完成子任务、已派发的 subagent、下一轮该读的路径。
+- 进程拉起后，未完成的会话按这份 checkpoint 续跑，而不是等用户把同一句再发一遍。
+- 成功或用户取消后清掉 checkpoint，避免下次误续。
+
+待敲定：checkpoint 放 OSS 还是 MySQL；续跑是自动开 run，还是等用户点继续。
