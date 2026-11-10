@@ -1,572 +1,334 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { api, clearSession, getUser, newIdempotencyKey } from '../api/client'
-import type { Conversation, List, Message, Run } from '../api/types'
-import { SubagentChip, SubagentDrawer } from '../components/SubagentDrawer'
+import {
+  api,
+  downloadAttachment,
+  getUser,
+  logout,
+  newIdempotencyKey,
+} from '../api/client'
+import type {
+  Attachment,
+  Conversation,
+  List,
+  Message,
+  MessageAccepted,
+  Run,
+} from '../api/types'
 import { ToolCallCard } from '../components/ToolCallCard'
-import { useRunStream, type Live } from '../hooks/useRunStream'
+import { useRunStream } from '../hooks/useRunStream'
 import { Markdown } from '../lib/Markdown'
-import { cohortFor, type SubagentRun } from '../lib/subagents'
-import { fetchRunTrace, mergeTrace, type Trace } from '../lib/trace'
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled'])
+const ACCEPT = ['.pdf', '.docx', '.txt', '.md', '.csv']
+const MAX_FILES = 10
+const MAX_FILE_BYTES = 25 * 1024 * 1024
 
-function httpStatus(error: unknown) {
-  if (typeof error === 'object' && error && 'status' in error) {
-    const status = (error as { status?: number }).status
-    return typeof status === 'number' ? status : 0
-  }
-  return 0
+function sizeLabel(size: number) {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
-function retryQuery(failureCount: number, error: unknown) {
-  const status = httpStatus(error)
-  if (status === 404 || status === 429) return false
-  return failureCount < 2
-}
-const ACCEPT_EXT = ['.pdf', '.docx', '.txt', '.md', '.csv']
-const MAX_FILES = 5
-const MAX_BYTES = 20 * 1024 * 1024
-
-function formatBytes(n: number) {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`
-  return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`
-}
-
-function seedMessage(qc: ReturnType<typeof useQueryClient>, conversationId: string, message: Message) {
-  qc.setQueryData<List<Message>>(['messages', conversationId], (old) => {
-    const items = old?.items ?? []
-    const next = items.some((m) => m.id === message.id)
-      ? items.map((m) => (m.id === message.id ? { ...m, ...message } : m))
-      : [...items, message]
-    return { items: next, next_before: old?.next_before ?? null }
-  })
-}
-
-function rejectReason(f: File): string | null {
-  const ext = `.${(f.name.split('.').pop() || '').toLowerCase()}`
-  if (ext === '.doc') return `${f.name}: 请另存为 .docx 后再上传`
-  if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.heic', '.bmp'].includes(ext)) {
-    return `${f.name}: 暂不支持图片，请上传 PDF 或 Word`
-  }
-  if (['.xls', '.xlsx', '.ppt', '.pptx'].includes(ext)) {
-    return `${f.name}: 暂不支持表格/PPT，请导出为 PDF`
-  }
-  if (!ACCEPT_EXT.includes(ext)) return `${f.name}: 仅支持 PDF、DOCX、TXT、MD、CSV`
-  if (f.size === 0) return `${f.name}: 文件是空的`
-  if (f.size > MAX_BYTES) return `${f.name}: 超过 20MB`
+function fileError(file: File) {
+  const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
+  if (!ACCEPT.includes(extension)) return `${file.name}: unsupported type`
+  if (!file.size) return `${file.name}: empty file`
+  if (file.size > MAX_FILE_BYTES) return `${file.name}: exceeds 25 MiB`
   return null
-}
-
-function explainSendError(err: unknown) {
-  const e = err as Error & { status?: number }
-  const msg = e?.message || '发送失败'
-  if (e?.status === 429 || msg === 'rate limited') return '请求太频繁，请稍后再试'
-  if (e?.status === 409 || msg.includes('already active')) return '请等当前研究完成后再发送'
-  if (e?.status === 404 || msg === 'not found') return '当前对话不可用，请点左侧 New research 开新对话'
-  return msg
-}
-
-function pollInterval(ms: number) {
-  return (query: { state: { error: unknown } }) => (httpStatus(query.state.error) === 429 ? 30_000 : ms)
-}
-
-function mergeFiles(cur: File[], incoming: File[]): { next: File[]; errors: string[] } {
-  const next = [...cur]
-  const errors: string[] = []
-  for (const f of incoming) {
-    const why = rejectReason(f)
-    if (why) {
-      errors.push(why)
-      continue
-    }
-    if (next.length >= MAX_FILES) {
-      errors.push(`一次最多 ${MAX_FILES} 个文件`)
-      break
-    }
-    if (!next.some((x) => x.name === f.name && x.size === f.size)) next.push(f)
-  }
-  return { next, errors }
 }
 
 export function WorkspacePage() {
   const { conversationId } = useParams({ strict: false }) as { conversationId?: string }
-  const nav = useNavigate()
-  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const user = getUser()
-  const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
   const [files, setFiles] = useState<File[]>([])
-  const filesRef = useRef<File[]>([])
-  filesRef.current = files
+  const [error, setError] = useState('')
+  const [localRun, setLocalRun] = useState<string | null>(null)
+  const [pending, setPending] = useState<Message | null>(null)
   const scroller = useRef<HTMLDivElement>(null)
-  const stickToBottom = useRef(true)
-  const [attachError, setAttachError] = useState<string | null>(null)
-  const [dragging, setDragging] = useState(false)
-  const [pending, setPending] = useState<{
-    tempId: string
-    content: string
-    attachments?: { filename: string; size: number }[]
-  } | null>(null)
-  const [localRun, setLocalRun] = useState<{ id: string; conversationId: string } | null>(null)
-  const [held, setHeld] = useState<Live | null>(null)
-  const [drawerParent, setDrawerParent] = useState<string | null>(null)
-  const [traces, setTraces] = useState<Record<string, Trace>>({})
-  const tracesRef = useRef(traces)
-  tracesRef.current = traces
-  const hydratedRuns = useRef(new Set<string>())
 
-  const convs = useQuery({
+  const conversations = useQuery({
     queryKey: ['conversations'],
     queryFn: () => api<List<Conversation>>('/v1/conversations'),
   })
-
   const detail = useQuery({
     queryKey: ['conversation', conversationId],
     queryFn: () => api<Conversation>(`/v1/conversations/${conversationId}`),
     enabled: !!conversationId,
-    retry: retryQuery,
-    refetchInterval: pollInterval(2000),
+    refetchInterval: (query) => (query.state.data?.active_run ? 2000 : false),
   })
-
   const messages = useQuery({
     queryKey: ['messages', conversationId],
-    queryFn: () => api<List<Message>>(`/v1/conversations/${conversationId}/messages?limit=100`),
+    queryFn: () => api<List<Message>>(`/v1/conversations/${conversationId}/messages?limit=200`),
     enabled: !!conversationId,
-    retry: retryQuery,
-    refetchInterval: (query) => {
-      if (httpStatus(query.state.error) === 429 || httpStatus(detail.error) === 429) return 30_000
-      return detail.data?.active_run ? 2000 : false
-    },
   })
 
-  const subagents = useQuery({
-    queryKey: ['subagents', conversationId],
-    queryFn: () => api<List<SubagentRun>>(`/v1/conversations/${conversationId}/subagents`),
-    enabled: !!conversationId,
-    retry: retryQuery,
-    refetchInterval: pollInterval(2000),
-  })
-
-  const missingConversation = httpStatus(detail.error) === 404
-  const activeRunId = detail.data?.active_run?.id ?? null
-  const runId =
-    localRun && conversationId && localRun.conversationId === conversationId ? localRun.id : activeRunId
-  const live = useRunStream(runId, !!runId)
-  const liveDone = live && TERMINAL.has(live.status)
+  const runId = localRun ?? detail.data?.active_run?.id ?? null
+  const live = useRunStream(runId)
+  const running = !!runId && !TERMINAL.has(live?.status ?? detail.data?.active_run?.status ?? 'queued')
 
   useEffect(() => {
-    setHeld(null)
+    setLocalRun(null)
+    setPending(null)
     setFiles([])
-    setAttachError(null)
-    setDragging(false)
-    setDrawerParent(null)
-    stickToBottom.current = true
+    setError('')
   }, [conversationId])
 
   useEffect(() => {
-    if (live) setHeld(live)
-  }, [live])
+    if (!live || !TERMINAL.has(live.status)) return
+    setLocalRun(null)
+    setPending(null)
+    void queryClient.invalidateQueries({ queryKey: ['messages', conversationId] })
+    void queryClient.invalidateQueries({ queryKey: ['conversation', conversationId] })
+    void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+  }, [conversationId, live, queryClient])
 
   useEffect(() => {
-    if (liveDone) {
-      setLocalRun((cur) => (cur && runId && cur.id === runId ? null : cur))
-      void qc.invalidateQueries({ queryKey: ['messages', conversationId] })
-      void qc.invalidateQueries({ queryKey: ['conversation', conversationId] })
-      void qc.invalidateQueries({ queryKey: ['conversations'] })
-    }
-  }, [liveDone, conversationId, qc, runId])
+    const element = scroller.current
+    if (element) element.scrollTop = element.scrollHeight
+  }, [messages.data?.items.length, pending, live?.text, live?.tools.length])
 
   const send = useMutation({
-    mutationFn: async (input: { content: string; files: File[] }) => {
-      const key = newIdempotencyKey()
-      const { content, files: attached } = input
-      const headers: HeadersInit = { 'Idempotency-Key': key }
-      const body: BodyInit =
-        attached.length > 0
-          ? (() => {
-              const fd = new FormData()
-              fd.append('content', content)
-              for (const f of attached) fd.append('files', f, f.name)
-              return fd
-            })()
-          : JSON.stringify({ content })
-      if (!conversationId) {
-        const out = await api<{ conversation: Conversation; message: Message; run: Run }>(
-          '/v1/conversations',
-          { method: 'POST', headers, body },
-        )
-        return out
+    mutationFn: async () => {
+      let target = conversationId
+      if (!target) {
+        const created = await api<Conversation>('/v1/conversations', { method: 'POST' })
+        target = created.id
       }
-      const out = await api<{ message: Message; run: Run }>(`/v1/conversations/${conversationId}/messages`, {
+      const form = new FormData()
+      form.append('content', draft.trim())
+      for (const file of files) form.append('files', file, file.name)
+      const accepted = await api<MessageAccepted>(`/v1/conversations/${target}/messages`, {
         method: 'POST',
-        headers,
-        body,
+        headers: { 'Idempotency-Key': newIdempotencyKey() },
+        body: form,
       })
-      return { ...out, conversation: { id: conversationId } as Conversation }
+      return { target, accepted }
     },
-    onSuccess: (out) => {
-      setAttachError(null)
-      if (out.message) seedMessage(qc, out.conversation.id, out.message)
-      setPending(null)
-      setLocalRun({ id: out.run.id, conversationId: out.conversation.id })
-      void qc.invalidateQueries({ queryKey: ['conversations'] })
-      if (!conversationId || conversationId !== out.conversation.id) {
-        nav({ to: '/c/$conversationId', params: { conversationId: out.conversation.id } })
+    onSuccess: ({ target, accepted }) => {
+      const attachments: Attachment[] = files.map((file, index) => ({
+        id: `pending-${index}`,
+        filename: file.name,
+        content_type: file.type,
+        size_bytes: file.size,
+      }))
+      setPending({
+        id: accepted.message_id,
+        conversation_id: target,
+        run_id: accepted.run_id,
+        role: 'user',
+        content: draft.trim(),
+        attachments,
+        created_at: new Date().toISOString(),
+      })
+      setDraft('')
+      setFiles([])
+      setLocalRun(accepted.run_id)
+      setError('')
+      void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      if (target !== conversationId) {
+        navigate({ to: '/c/$conversationId', params: { conversationId: target } })
       } else {
-        void qc.invalidateQueries({ queryKey: ['conversation', conversationId] })
-        void qc.invalidateQueries({ queryKey: ['messages', conversationId] })
+        void queryClient.invalidateQueries({ queryKey: ['messages', target] })
+        void queryClient.invalidateQueries({ queryKey: ['conversation', target] })
       }
     },
+    onError: (reason) => setError(reason instanceof Error ? reason.message : 'Send failed.'),
   })
 
   const cancel = useMutation({
-    mutationFn: (runId: string) => api(`/v1/runs/${runId}/cancel`, { method: 'POST' }),
+    mutationFn: (id: string) => api<Run>(`/v1/runs/${id}/cancel`, { method: 'POST' }),
   })
 
-  function submit() {
-    const content = draft.trim()
-    if ((!content && files.length === 0) || send.isPending) return
-    const attached = files
-    setPending({
-      tempId: `tmp-${Date.now()}`,
-      content,
-      attachments: attached.map((f) => ({ filename: f.name, size: f.size })),
-    })
-    setDraft('')
-    setFiles([])
-    setAttachError(null)
-    stickToBottom.current = true
-    send.mutate(
-      { content, files: attached },
-      {
-        onError: (err) => {
-          setDraft(content)
-          setFiles(attached)
-          setPending(null)
-          setAttachError(explainSendError(err))
-        },
-      },
-    )
-  }
+  const remove = useMutation({
+    mutationFn: (id: string) => api(`/v1/conversations/${id}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      navigate({ to: '/' })
+    },
+  })
 
-  function addFiles(picked: ArrayLike<File> | null | undefined) {
-    const incoming = picked ? Array.from(picked) : []
-    if (incoming.length === 0) return
-    const { next, errors } = mergeFiles(filesRef.current, incoming)
-    filesRef.current = next
-    setFiles(next)
-    setAttachError(errors[0] ?? null)
-  }
-
-  function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      e.preventDefault()
-      submit()
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-      e.preventDefault()
-      document.getElementById('conv-search')?.focus()
-    }
-  }
-
-  const history = conversationId ? (messages.data?.items ?? []) : []
   const shown = useMemo(() => {
-    const rows = [...history]
-    if (pending && !rows.some((m) => m.id === pending.tempId)) {
-      rows.push({
-        id: pending.tempId,
-        conversation_id: conversationId || '',
-        role: 'user',
-        content: pending.content,
-        attachments: pending.attachments?.map((a, i) => ({
-          id: `tmp-${i}`,
-          filename: a.filename,
-          content_type: '',
-          size: a.size,
-        })),
-        created_at: new Date().toISOString(),
-      })
-    }
-    return rows
-  }, [history, pending, conversationId])
+    const items = [...(messages.data?.items ?? [])]
+    if (pending && !items.some((item) => item.id === pending.id)) items.push(pending)
+    return items
+  }, [messages.data?.items, pending])
 
-  const display = live ?? held
-  const subagentItems = subagents.data?.items ?? []
-  const historyHasLive = !!display && shown.some((m) => m.role === 'assistant' && m.run_id === display.runId)
-  const showLive = !!runId && !!display && display.runId === runId && !historyHasLive
-  const active = showLive && !TERMINAL.has(display?.status ?? '')
-  const lastAssistantId = [...shown].reverse().find((m) => m.role === 'assistant')?.id
-
-  useEffect(() => {
-    if (!display?.runId) return
-    if (!display.reasoning && display.tools.length === 0) return
-    setTraces((cur) => ({
-      ...cur,
-      [display.runId]: mergeTrace(cur[display.runId], { reasoning: display.reasoning, tools: display.tools }),
-    }))
-  }, [display])
-
-  useEffect(() => {
-    const ids = [
-      ...new Set(shown.filter((m) => m.role === 'assistant' && m.run_id).map((m) => m.run_id as string)),
-    ]
-    let cancelled = false
-    for (const id of ids) {
-      const have = tracesRef.current[id]
-      if (hydratedRuns.current.has(id)) continue
-      if (have && (have.reasoning || have.tools.length > 0)) {
-        hydratedRuns.current.add(id)
+  function addFiles(incoming: File[]) {
+    const next = [...files]
+    for (const file of incoming) {
+      const problem = fileError(file)
+      if (problem) {
+        setError(problem)
         continue
       }
-      hydratedRuns.current.add(id)
-      void fetchRunTrace(id)
-        .then((trace) => {
-          if (cancelled) return
-          if (!trace.reasoning && trace.tools.length === 0) return
-          setTraces((cur) => ({ ...cur, [id]: mergeTrace(cur[id], trace) }))
-        })
-        .catch(() => {
-          hydratedRuns.current.delete(id)
-        })
+      if (next.length >= MAX_FILES) {
+        setError(`At most ${MAX_FILES} files are allowed.`)
+        break
+      }
+      if (!next.some((item) => item.name === file.name && item.size === file.size)) next.push(file)
     }
-    return () => {
-      cancelled = true
-    }
-  }, [shown])
-
-  useEffect(() => {
-    if (historyHasLive) {
-      setHeld(null)
-      if (localRun && display?.runId === localRun.id) setLocalRun(null)
-    }
-  }, [historyHasLive, localRun, display?.runId])
-
-  function pinIfNearBottom() {
-    const el = scroller.current
-    if (!el) return
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96
+    setFiles(next)
   }
 
-  useEffect(() => {
-    const el = scroller.current
-    if (!el || !stickToBottom.current) return
-    el.scrollTop = el.scrollHeight
-  }, [shown.length, display?.text, display?.reasoning, display?.note, display?.tools.length])
+  function submit() {
+    if (send.isPending || running || (!draft.trim() && !files.length)) return
+    send.mutate()
+  }
 
-  const running = active || send.isPending
+  function keyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault()
+      submit()
+    }
+  }
 
   return (
     <div className="h-full flex">
-      <aside className={`border-r border-[#2a2a2a] bg-[#141414] flex flex-col ${collapsed ? 'w-12' : 'w-60'}`}>
-        <div className="h-10 px-2 flex items-center justify-between border-b border-[#2a2a2a]">
-          {!collapsed && <span className="text-xs text-[#8a8a8a] truncate">{user?.display_name}</span>}
-          <button className="text-[#8a8a8a] px-1" onClick={() => setCollapsed((v) => !v)} title="Toggle sidebar">
-            {collapsed ? '›' : '‹'}
-          </button>
+      <aside className="w-60 border-r border-[#2a2a2a] bg-[#141414] flex flex-col">
+        <div className="h-10 px-3 flex items-center border-b border-[#2a2a2a] text-xs text-[#8a8a8a] truncate">
+          {user?.email}
         </div>
-        {!collapsed && (
-          <>
-            <button
-              className="mx-2 mt-2 mb-1 border border-[#2a2a2a] px-2 py-1 text-left hover:bg-[#1c1c1c]"
-              onClick={() => {
-                setDraft('')
-                setFiles([])
-                setPending(null)
-                nav({ to: '/' })
-              }}
+        <button
+          className="mx-2 mt-2 border border-[#2a2a2a] px-2 py-1 text-left hover:bg-[#1c1c1c]"
+          onClick={() => navigate({ to: '/' })}
+        >
+          New research
+        </button>
+        <div className="flex-1 overflow-y-auto px-1 py-2">
+          {(conversations.data?.items ?? []).map((conversation) => (
+            <Link
+              key={conversation.id}
+              to="/c/$conversationId"
+              params={{ conversationId: conversation.id }}
+              className={`block px-2 py-1.5 truncate hover:bg-[#1c1c1c] ${
+                conversation.id === conversationId ? 'bg-[#1c1c1c]' : ''
+              }`}
             >
-              New research
-            </button>
-            <div className="flex-1 overflow-y-auto px-1">
-              {(convs.data?.items ?? []).map((c) => (
-                <Link
-                  key={c.id}
-                  to="/c/$conversationId"
-                  params={{ conversationId: c.id }}
-                  className={`block px-2 py-1.5 truncate hover:bg-[#1c1c1c] ${
-                    c.id === conversationId ? 'bg-[#1c1c1c]' : ''
-                  }`}
-                >
-                  {c.title}
-                </Link>
-              ))}
-            </div>
-            <button
-              className="h-9 text-[#8a8a8a] border-t border-[#2a2a2a]"
-              onClick={() => {
-                clearSession()
-                location.assign('/login')
-              }}
-            >
-              Sign out
-            </button>
-          </>
-        )}
+              {conversation.title}
+            </Link>
+          ))}
+        </div>
+        <button
+          className="h-9 text-[#8a8a8a] border-t border-[#2a2a2a]"
+          onClick={() => void logout().finally(() => location.assign('/login'))}
+        >
+          Sign out
+        </button>
       </aside>
 
-      <main className={`flex-1 flex flex-col min-w-0${drawerParent ? ' dx-workspace--drawer' : ''}`}>
-        <header className="h-10 px-4 border-b border-[#2a2a2a] flex items-center justify-between gap-3 text-[#8a8a8a] text-xs">
-          <div className="min-w-0 flex items-center">
-            <span className="truncate">{conversationId ? detail.data?.title || 'New thread' : 'New thread'}</span>
-            {running && <span className="ml-3 shrink-0">running</span>}
-          </div>
-          <button
-            className="shrink-0 w-7 h-7 border border-[#2a2a2a] hover:bg-[#1c1c1c] text-base leading-none"
-            title="New research"
-            onClick={() => {
-              setDraft('')
-              setFiles([])
-              setPending(null)
-              nav({ to: '/' })
-            }}
-          >
-            +
-          </button>
+      <main className="flex-1 min-w-0 flex flex-col">
+        <header className="h-10 px-4 border-b border-[#2a2a2a] flex items-center justify-between text-xs text-[#8a8a8a]">
+          <span className="truncate">{detail.data?.title ?? 'New research'}</span>
+          {conversationId && (
+            <button className="hover:text-red-400" onClick={() => remove.mutate(conversationId)}>
+              Delete
+            </button>
+          )}
         </header>
 
-        <div
-          ref={scroller}
-          className="flex-1 overflow-y-auto px-6 py-4 overscroll-contain [overflow-anchor:none]"
-          onScroll={pinIfNearBottom}
-          onWheel={(e) => {
-            if (e.deltaY < 0) stickToBottom.current = false
-            else requestAnimationFrame(pinIfNearBottom)
-          }}
-        >
+        <div ref={scroller} className="flex-1 overflow-y-auto px-6 py-4">
           <div className="max-w-3xl mx-auto space-y-5">
-            {conversationId && missingConversation && (
-              <div className="border border-red-900 bg-[#1a1010] px-3 py-2 text-[12px] text-red-400">
-                找不到这个对话（可能属于别的账号）。
-                <button className="ml-2 underline" onClick={() => nav({ to: '/' })}>
-                  开始新研究
-                </button>
-              </div>
-            )}
-            {conversationId && !missingConversation && (detail.isError || messages.isError) && shown.length === 0 && (
-              <p className="text-red-400 pt-16 text-sm">{explainSendError(messages.error || detail.error)}</p>
-            )}
-            {shown.length === 0 && !pending && !missingConversation && !detail.isError && !messages.isError && (
+            {!shown.length && !runId && (
               <p className="text-[#8a8a8a] pt-16">Ask a research question. Cmd+Enter to send.</p>
             )}
-            {shown.map((m) => {
-              const trace = m.run_id ? traces[m.run_id] : undefined
-              const hideBody = showLive && display?.runId === m.run_id && m.role === 'assistant'
-              const cohort = m.role === 'assistant' && m.run_id ? cohortFor(subagentItems, m.run_id) : []
-              if (hideBody) return null
-              return (
-                <article key={m.id}>
-                  <div className="text-[11px] text-[#8a8a8a] mb-1">{m.role}</div>
-                  {m.role === 'assistant' ? (
-                    <>
-                      <TraceBlock
-                        reasoning={trace?.reasoning ?? ''}
-                        tools={trace?.tools ?? []}
-                        open={m.id === lastAssistantId}
-                      />
-                      {cohort.length > 0 && m.run_id ? (
-                        <SubagentChip items={cohort} onOpen={() => setDrawerParent(m.run_id ?? null)} />
-                      ) : null}
-                      <Markdown text={m.content} />
-                    </>
-                  ) : (
-                    <>
-                      <FileChips items={m.attachments} />
-                      {m.content ? <p className="whitespace-pre-wrap">{m.content}</p> : null}
-                    </>
-                  )}
-                </article>
-              )
-            })}
-            {showLive && display && (
-              <LivePane
-                live={display}
-                cohort={runId ? cohortFor(subagentItems, runId) : []}
-                onOpenCohort={() => runId && setDrawerParent(runId)}
-              />
+            {shown.map((message) => (
+              <article key={message.id}>
+                <div className="text-[11px] text-[#8a8a8a] mb-1">{message.role}</div>
+                {message.attachments.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {message.attachments.map((attachment) => (
+                      <button
+                        key={attachment.id}
+                        className="dx-filechip"
+                        disabled={attachment.id.startsWith('pending-')}
+                        onClick={() => void downloadAttachment(attachment.id, attachment.filename)}
+                      >
+                        {attachment.filename}
+                        <span className="dx-filechip__size">{sizeLabel(attachment.size_bytes)}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {message.role === 'assistant' ? (
+                  <Markdown text={message.content} />
+                ) : (
+                  <p className="whitespace-pre-wrap">{message.content}</p>
+                )}
+              </article>
+            ))}
+            {runId && live && !shown.some((message) => message.role === 'assistant' && message.run_id === runId) && (
+              <article>
+                <div className="text-[11px] text-[#8a8a8a] mb-1">assistant</div>
+                {!live.text && !live.error && <p className="text-[#8a8a8a]">{live.note || 'Queued…'}</p>}
+                {live.subtasks.length > 0 && (
+                  <div className="text-xs text-[#8a8a8a] mb-2">
+                    {live.subtasks.map((task) => (
+                      <div key={task.id}>{task.status} · {task.description}</div>
+                    ))}
+                  </div>
+                )}
+                {live.tools.length > 0 && (
+                  <div className="dx-tools">
+                    {live.tools.map((tool) => <ToolCallCard key={tool.id} call={tool} />)}
+                  </div>
+                )}
+                {live.text && <Markdown text={live.text} />}
+                {live.error && <p className="text-red-400 text-xs mt-2">{live.error}</p>}
+              </article>
             )}
           </div>
         </div>
 
         <div className="border-t border-[#2a2a2a] p-3">
-          <div
-            className={`max-w-3xl mx-auto border bg-[#141414] ${dragging ? 'border-[#8a8a8a]' : 'border-[#2a2a2a]'}`}
-            onDragEnter={(e) => {
-              e.preventDefault()
-              setDragging(true)
-            }}
-            onDragOver={(e) => {
-              e.preventDefault()
-              setDragging(true)
-            }}
-            onDragLeave={(e) => {
-              if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false)
-            }}
-            onDrop={(e) => {
-              e.preventDefault()
-              setDragging(false)
-              addFiles(Array.from(e.dataTransfer.files ?? []))
-            }}
-            onPaste={(e) => {
-              if (e.clipboardData?.files?.length) addFiles(Array.from(e.clipboardData.files))
-            }}
-          >
+          <div className="max-w-3xl mx-auto border border-[#2a2a2a] bg-[#141414]">
             {files.length > 0 && (
               <div className="px-3 pt-2 flex flex-wrap gap-1">
-                {files.map((f, i) => (
+                {files.map((file, index) => (
                   <button
-                    key={`${f.name}-${i}`}
-                    type="button"
+                    key={`${file.name}-${file.size}`}
                     className="dx-filechip"
-                    onClick={() => setFiles((cur) => cur.filter((_, j) => j !== i))}
-                    title="Remove"
+                    onClick={() => setFiles((current) => current.filter((_, item) => item !== index))}
                   >
-                    {f.name}
-                    <span className="dx-filechip__size">{formatBytes(f.size)}</span>
-                    <span aria-hidden> ×</span>
+                    {file.name} <span className="dx-filechip__size">{sizeLabel(file.size)}</span> ×
                   </button>
                 ))}
               </div>
             )}
-            {(attachError || send.isError) && (
-              <p className="px-3 pt-2 text-[11px] text-red-400">
-                {attachError || explainSendError(send.error)}
-              </p>
-            )}
+            {error && <p className="px-3 pt-2 text-red-400 text-xs">{error}</p>}
             <textarea
               className="w-full bg-transparent px-3 py-2 outline-none min-h-[72px]"
-              placeholder={dragging ? '松开即可添加文件' : '研究问题，可同时附带 PDF / DOCX / 文本'}
+              placeholder="Research question, optionally with PDF, DOCX, or text files"
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={onKey}
-              onPaste={(e) => {
-                if (e.clipboardData?.files?.length) addFiles(Array.from(e.clipboardData.files))
-              }}
-              disabled={running || send.isPending || missingConversation}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={keyDown}
+              disabled={running || send.isPending}
             />
             <div className="flex items-center gap-2 px-2 pb-2">
               <input
+                className="min-w-0 flex-1 text-[11px] text-[#8a8a8a]"
                 type="file"
                 multiple
-                accept=".pdf,.docx,.txt,.md,.csv"
-                disabled={send.isPending || missingConversation}
-                className="min-w-0 flex-1 text-[11px] text-[#8a8a8a] file:mr-2 file:border file:border-[#2a2a2a] file:bg-[#1c1c1c] file:px-2 file:py-0.5 file:text-[#e8e8e8] file:cursor-pointer"
-                onChange={(e) => {
-                  addFiles(Array.from(e.target.files ?? []))
-                  e.target.value = ''
+                accept={ACCEPT.join(',')}
+                disabled={running || send.isPending}
+                onChange={(event) => {
+                  addFiles(Array.from(event.target.files ?? []))
+                  event.target.value = ''
                 }}
               />
               {running && runId ? (
-                <button onClick={() => cancel.mutate(runId)} className="shrink-0 border border-[#2a2a2a] px-2 py-0.5 text-xs">
+                <button className="border border-[#2a2a2a] px-2 py-0.5" onClick={() => cancel.mutate(runId)}>
                   Stop
                 </button>
               ) : (
                 <button
+                  className="border border-[#2a2a2a] px-2 py-0.5 disabled:opacity-40"
+                  disabled={send.isPending || (!draft.trim() && !files.length)}
                   onClick={submit}
-                  disabled={(!draft.trim() && files.length === 0) || send.isPending || missingConversation}
-                  className="shrink-0 border border-[#2a2a2a] px-2 py-0.5 text-xs disabled:opacity-40"
                 >
                   {send.isPending ? 'Sending…' : 'Send'}
                 </button>
@@ -575,79 +337,6 @@ export function WorkspacePage() {
           </div>
         </div>
       </main>
-      {drawerParent ? (
-        <SubagentDrawer items={cohortFor(subagentItems, drawerParent)} onClose={() => setDrawerParent(null)} />
-      ) : null}
     </div>
-  )
-}
-
-function FileChips({ items }: { items?: { filename: string; size?: number }[] }) {
-  if (!items || items.length === 0) return null
-  return (
-    <div className="flex flex-wrap gap-1 mb-1">
-      {items.map((a, i) => (
-        <span key={`${a.filename}-${i}`} className="dx-filechip dx-filechip--static" title={a.filename}>
-          {a.filename}
-          {a.size ? <span className="dx-filechip__size">{formatBytes(a.size)}</span> : null}
-        </span>
-      ))}
-    </div>
-  )
-}
-
-function TraceBlock({
-  reasoning,
-  tools,
-  open,
-}: {
-  reasoning: string
-  tools: Live['tools']
-  open: boolean
-}) {
-  if (!reasoning && tools.length === 0) return null
-  return (
-    <>
-      {reasoning && (
-        <details className="mb-2 text-[#8a8a8a]" {...(open ? { open: true } : {})}>
-          <summary className="cursor-pointer">thinking</summary>
-          <p className="whitespace-pre-wrap mt-1">{reasoning}</p>
-        </details>
-      )}
-      {tools.length > 0 && (
-        <div className="dx-tools">
-          {tools.map((t) => (
-            <ToolCallCard key={t.id} call={t} />
-          ))}
-        </div>
-      )}
-    </>
-  )
-}
-
-function LivePane({
-  live,
-  cohort,
-  onOpenCohort,
-}: {
-  live: Live
-  cohort: SubagentRun[]
-  onOpenCohort: () => void
-}) {
-  const waiting = !live.text && !live.reasoning && live.tools.length === 0 && !live.error
-  return (
-    <article>
-      <div className="text-[11px] text-[#8a8a8a] mb-1">assistant</div>
-      {cohort.length > 0 && <SubagentChip items={cohort} onOpen={onOpenCohort} />}
-      {waiting && (
-        <details className="mb-2 text-[#8a8a8a]" open>
-          <summary className="cursor-pointer">thinking</summary>
-          <p className="whitespace-pre-wrap mt-1">{live.note || 'Working on it…'}</p>
-        </details>
-      )}
-      <TraceBlock reasoning={live.reasoning} tools={live.tools} open />
-      {live.text && <Markdown text={live.text} />}
-      {live.error && <p className="text-red-400 text-xs mt-2">{live.error}</p>}
-    </article>
   )
 }

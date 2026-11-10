@@ -1,28 +1,28 @@
 export type User = {
   id: string
   email: string
-  display_name: string
-  tenant_id: string
+  created_at: string
 }
 
 export type TokenPair = {
   access_token: string
-  refresh_token: string
+  token_type: 'bearer'
   expires_in: number
   user: User
 }
 
 export type Run = {
   id: string
-  conversation_id?: string
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | string
-  error?: string | null
+  conversation_id: string
+  status: 'queued' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'
+  attempt_count: number
+  created_at: string
 }
 
 export type Conversation = {
   id: string
   title: string
-  active_run: Run | null
+  active_run?: Run | null
   updated_at: string
   created_at: string
 }
@@ -30,10 +30,10 @@ export type Conversation = {
 export type Message = {
   id: string
   conversation_id: string
-  run_id?: string | null
-  role: 'user' | 'assistant' | 'system' | string
+  run_id: string
+  role: 'user' | 'assistant'
   content: string
-  attachments?: Attachment[]
+  attachments: Attachment[]
   created_at: string
 }
 
@@ -41,20 +41,22 @@ export type Attachment = {
   id: string
   filename: string
   content_type: string
-  size: number
+  size_bytes: number
 }
 
 export type List<T> = {
   items: T[]
-  next_before: string | null
+  next_cursor: string | null
+}
+
+export type MessageAccepted = {
+  run_id: string
+  message_id: string
+  status: Run['status']
 }
 
 export type AgentEvent = {
-  v?: number
-  run_id?: string
-  conversation_id?: string
   seq: number
   type: string
-  payload?: Record<string, unknown> | string
-  ts?: string
+  payload: Record<string, unknown>
 }

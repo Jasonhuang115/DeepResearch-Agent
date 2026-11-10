@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import re
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,18 +23,16 @@ from research_engine.types import LLMClient
 
 log = logging.getLogger("agent_service.subagents")
 
-# Sized for one parent, ten children, and ten grandchildren in flight together.
-MAX_INFLIGHT = 21
-MAX_DEPTH = 2
+MAX_INFLIGHT = 10
+MAX_DEPTH = 1
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 SPAWN_DESCRIPTION = (
-    "Start a subagent in the background and return immediately. "
+    "Run one research subtask and wait for its report. "
     "Pass description (the task), max_time (fallback seconds for this subagent only; "
     "it stops when the task is done, and max_time only cancels a runaway), and id "
     "(a unique name you choose). The subagent writes conclusions to "
-    "subagents/{id}/report.md. You are not shown that report in this turn. "
-    "Do not wait for it. Depth stops at a grandchild: a grandchild cannot spawn."
+    "subagents/{id}/report.md and returns the report. Subagents cannot spawn."
 )
 SPAWN_PARAMETERS: dict[str, Any] = {
     "type": "object",
@@ -53,19 +51,13 @@ SPAWN_PARAMETERS: dict[str, Any] = {
     "required": ["description", "max_time", "id"],
 }
 
-PublishWake = Callable[[dict[str, Any]], Awaitable[None]]
 LLMFactory = Callable[[], LLMClient]
 RegistryFactory = Callable[["Job", Workspace, "Session | None"], ToolRegistry]
-EventFactory = Callable[[str, str, str], Any]
 
 
 def subagent_system(description: str, *, depth: int, can_spawn: bool) -> str:
-    spawn = (
-        "You may call spawn_subagent to start one level of grandchildren. "
-        "That call returns immediately. You will not receive their reports in this loop."
-        if can_spawn
-        else "You cannot spawn further subagents."
-    )
+    _ = can_spawn
+    spawn = "You cannot spawn further subagents."
     return (
         "You are a research subagent. Work only on the task below. "
         "Reply with conclusions as you learn them; those replies are saved to your report. "
@@ -80,7 +72,6 @@ def subagent_system(description: str, *, depth: int, can_spawn: bool) -> str:
 @dataclass
 class Session:
     conversation_id: str
-    tenant_id: str = ""
     user_id: str = ""
     parent_run_id: str = ""
     workspace: Workspace | None = None
@@ -97,42 +88,32 @@ class Job:
     depth: int
     description: str
     max_time: float
-    run_id: str = ""
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     suppress_wake: bool = False
     timed_out: bool = False
     task: asyncio.Task[None] | None = None
+    parent_emitter: Any = None
 
 
 class Supervisor:
     def __init__(
         self,
         *,
-        publish_wake: PublishWake | None = None,
         llm_factory: LLMFactory | None = None,
         registry_factory: RegistryFactory | None = None,
     ) -> None:
-        self._publish = publish_wake
         self._llm_factory = llm_factory
         self._registry_factory = registry_factory
-        self._event_factory: EventFactory | None = None
         self._lock = asyncio.Lock()
         self._sessions: dict[str, Session] = {}
         self._running: dict[str, dict[str, Job]] = {}
         self._used: dict[str, set[str]] = {}
         self._keep_stops: dict[str, asyncio.Event] = {}
 
-    def bind_publisher(self, publish_wake: PublishWake) -> None:
-        self._publish = publish_wake
-
-    def bind_events(self, factory: EventFactory) -> None:
-        self._event_factory = factory
-
     def note_session(
         self,
         *,
         conversation_id: str,
-        tenant_id: str = "",
         user_id: str = "",
         parent_run_id: str = "",
         workspace: Workspace | None = None,
@@ -145,8 +126,6 @@ class Supervisor:
         if current is None:
             current = Session(conversation_id=conversation_id)
             self._sessions[conversation_id] = current
-        if tenant_id:
-            current.tenant_id = tenant_id
         if user_id:
             current.user_id = user_id
         if parent_run_id:
@@ -224,6 +203,7 @@ class Supervisor:
                 depth=parent_depth + 1,
                 description=description,
                 max_time=max_time,
+                parent_emitter=parent_emitter,
             )
             used.add(sub_id)
             running[sub_id] = job
@@ -238,10 +218,8 @@ class Supervisor:
             return f"error: {exc}"
 
         if parent_emitter is not None:
-            job.run_id = new_run_public_id()
             payload: dict[str, Any] = {
                 "subagent_id": sub_id,
-                "child_run_id": job.run_id,
                 "description": description[:512],
                 "depth": job.depth,
             }
@@ -254,7 +232,12 @@ class Supervisor:
                 return f"error: {exc}"
 
         job.task = asyncio.create_task(self._drive(job), name=f"subagent-{sub_id}")
-        return f"spawned id={sub_id} status=running report={report_path(sub_id)}"
+        await job.task
+        try:
+            report = await workspace.read_text(report_path(sub_id))
+        except FileNotFoundError:
+            report = ""
+        return report or f"subagent {sub_id} finished without a report"
 
     async def cancel_conversation(self, conversation_id: str) -> None:
         async with self._lock:
@@ -304,7 +287,9 @@ class Supervisor:
                 await session.workspace.keepalive()
                 sandbox_id = _sandbox_id(session.workspace)
                 if session.store is not None and sandbox_id:
-                    await session.store.set(conversation_id, sandbox_id, settings.sandbox_redis_ttl_sec)
+                    await session.store.set(
+                        conversation_id, sandbox_id, settings.sandbox_redis_ttl_sec
+                    )
             except Exception:
                 log.warning("subagent keepalive failed", exc_info=True)
 
@@ -321,7 +306,6 @@ class Supervisor:
                 "parent_run_id": session.parent_run_id if session is not None else "",
                 "conversation_id": job.conversation_id,
                 "depth": job.depth,
-                "run_id": job.run_id,
             },
         ) as span:
             try:
@@ -345,7 +329,9 @@ class Supervisor:
         await self._finish(job, status)
 
     async def _run_bounded(self, job: Job, sink: ReportSink, tracer: Any) -> None:
-        work = asyncio.create_task(self._loop(job, sink, tracer), name=f"subagent-loop-{job.sub_id}")
+        work = asyncio.create_task(
+            self._loop(job, sink, tracer), name=f"subagent-loop-{job.sub_id}"
+        )
         try:
             await asyncio.wait_for(asyncio.shield(work), timeout=job.max_time)
         except TimeoutError:
@@ -355,29 +341,27 @@ class Supervisor:
                 await asyncio.wait_for(work, timeout=30)
             except TimeoutError:
                 work.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await work
-                except (asyncio.CancelledError, Exception):
-                    pass
         except asyncio.CancelledError:
             job.suppress_wake = True
             job.cancel.set()
             work.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await work
-            except (asyncio.CancelledError, Exception):
-                pass
             raise
 
     async def _loop(self, job: Job, sink: ReportSink, tracer: Any) -> None:
         session = self._sessions.get(job.conversation_id)
         workspace = session.workspace if session is not None else None
         if workspace is None:
-            await sink.emit("run.finished", {"status": "failed", "error": "workspace is not available"})
+            await sink.emit(
+                "run.finished",
+                {"status": "failed", "error": "workspace is not available"},
+            )
             return
         llm = self._llm()
-        child_seq = self._child_emitter(job)
-        tools = self._registry(job, workspace, session, child_seq)
+        tools = self._registry(job, workspace, session)
         messages = [
             {
                 "role": "system",
@@ -389,15 +373,11 @@ class Supervisor:
             },
             {"role": "user", "content": job.description},
         ]
-        target = sink
-        if child_seq is not None:
-            await child_seq.emit("run.started", {})
-            target = _Tee(sink, child_seq)
         await run_loop(
             llm=llm,
             tools=tools,
             messages=messages,
-            seq=target,
+            seq=sink,
             cancel=job.cancel,
             max_turns=None,
             max_report_chars=settings.max_report_chars,
@@ -410,11 +390,14 @@ class Supervisor:
         job: Job,
         workspace: Workspace,
         session: Session | None,
-        child_seq: Any = None,
     ) -> ToolRegistry:
         if self._registry_factory is not None:
             return self._registry_factory(job, workspace, session)
-        ledger = session.ledger if session and session.ledger is not None else SourceLedger(workspace)
+        ledger = (
+            session.ledger
+            if session and session.ledger is not None
+            else SourceLedger(workspace)
+        )
         overflow = Overflow(
             workspace,
             run_id=job.sub_id,
@@ -428,31 +411,12 @@ class Supervisor:
             fetcher=session.fetcher if session else None,
             overflow=overflow,
         )
-        if job.depth < MAX_DEPTH:
-            registry.register(
-                "spawn_subagent",
-                self.spawn_tool(
-                    job.conversation_id,
-                    job.depth,
-                    parent_emitter=child_seq,
-                    parent_subagent_id=job.sub_id,
-                ),
-                description=SPAWN_DESCRIPTION,
-                parameters=SPAWN_PARAMETERS,
-            )
         return registry
 
     def _llm(self) -> LLMClient:
         if self._llm_factory is None:
             raise RuntimeError("subagent llm factory is not configured")
         return self._llm_factory()
-
-    def _child_emitter(self, job: Job) -> Any:
-        if not job.run_id or self._event_factory is None:
-            return None
-        session = self._sessions.get(job.conversation_id)
-        tenant_id = session.tenant_id if session is not None else ""
-        return self._event_factory(job.run_id, job.conversation_id, tenant_id)
 
     def _workspace(self, job: Job) -> Workspace:
         session = self._sessions.get(job.conversation_id)
@@ -469,24 +433,11 @@ class Supervisor:
             except Exception:
                 log.exception("subagent status write failed")
         await self._release(job)
-        if job.suppress_wake or session is None:
-            return
-        payload = {
-            "v": 1,
-            "conversation_id": job.conversation_id,
-            "tenant_id": session.tenant_id,
-            "user_id": session.user_id,
-            "id": job.sub_id,
-            "status": status,
-            "report_path": report_path(job.sub_id),
-        }
-        if self._publish is None:
-            log.error("subagent wake dropped; publisher is not bound")
-            return
-        try:
-            await self._publish(payload)
-        except Exception:
-            log.exception("subagent wake publish failed")
+        if job.parent_emitter is not None:
+            await job.parent_emitter.emit(
+                "subagent.finished",
+                {"subagent_id": job.sub_id, "status": status, "depth": job.depth},
+            )
 
     async def _release(self, job: Job) -> None:
         stop: asyncio.Event | None = None
@@ -524,16 +475,3 @@ def _sandbox_id(workspace: Workspace) -> str | None:
     client = getattr(inner, "client", None)
     sid = getattr(client, "sandbox_id", None)
     return str(sid) if sid else None
-
-
-def new_run_public_id() -> str:
-    return "run_" + uuid.uuid4().hex
-
-
-class _Tee:
-    def __init__(self, *sinks: Any) -> None:
-        self._sinks = sinks
-
-    async def emit(self, typ: str, payload: dict | None = None) -> None:
-        for sink in self._sinks:
-            await sink.emit(typ, payload)

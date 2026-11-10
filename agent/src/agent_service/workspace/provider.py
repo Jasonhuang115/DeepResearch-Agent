@@ -42,16 +42,13 @@ def build_provider(
     if not want_e2b:
         return local
     if not key and factory is None:
-        log.info("E2B requested without API key; using local workspace")
-        return local
+        raise RuntimeError("E2B_API_KEY is required when AGENT_WORKSPACE=e2b")
     e2b_factory = factory if factory is not None else try_sdk_factory(key)
     if e2b_factory is None:
-        log.warning("E2B backend unavailable; using local workspace")
-        return local
+        raise RuntimeError("E2B SDK is unavailable")
     return E2BProvider(
         factory=e2b_factory,
         store=store if store is not None else _build_store(),
-        local=local,
         timeout_sec=settings.e2b_timeout_sec,
         ttl_sec=settings.sandbox_redis_ttl_sec,
     )

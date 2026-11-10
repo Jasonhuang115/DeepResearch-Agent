@@ -3,12 +3,6 @@
 .env.local
 *.log
 
-# Go
-backend/bin/
-backend/vendor/
-backend/coverage.out
-backend/server
-
 # Python
 agent/.venv/
 agent/__pycache__/

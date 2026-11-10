@@ -7,11 +7,6 @@ from pathlib import Path
 
 class Settings:
     http_addr: str = os.getenv("AGENT_HTTP_ADDR", "127.0.0.1:8001")
-    kafka_brokers: str = os.getenv("KAFKA_BROKERS", "127.0.0.1:9092")
-    commands_topic: str = os.getenv("KAFKA_COMMANDS_TOPIC", "research.run.commands")
-    events_topic: str = os.getenv("KAFKA_EVENTS_TOPIC", "research.run.events")
-    wakes_topic: str = os.getenv("KAFKA_WAKES_TOPIC", "research.subagent.wakes")
-    group: str = os.getenv("KAFKA_GROUP", "agent")
     max_report_chars: int = int(os.getenv("MAX_REPORT_CHARS", "200000"))
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -20,7 +15,7 @@ class Settings:
     openai_reasoning_effort: str = os.getenv("OPENAI_REASONING_EFFORT", "")
     max_turns: int = int(os.getenv("AGENT_MAX_TURNS", "8"))
     max_output_continuations: int = int(os.getenv("AGENT_MAX_OUTPUT_CONTINUATIONS", "2"))
-    workspace_mode: str = os.getenv("AGENT_WORKSPACE", "auto")
+    workspace_mode: str = os.getenv("AGENT_WORKSPACE", "local")
     workspace_root: str = os.getenv(
         "AGENT_WORKSPACE_ROOT",
         str(Path(tempfile.gettempdir()) / "research-workspaces"),
@@ -38,16 +33,11 @@ class Settings:
     tool_result_max_chars: int = int(os.getenv("AGENT_TOOL_RESULT_MAX_CHARS", "10000"))
     context_input_budget: int = int(os.getenv("AGENT_CONTEXT_INPUT_BUDGET", "100000"))
     keepalive_sec: int = int(os.getenv("AGENT_KEEPALIVE_SEC", "60"))
-    durable_root: str = os.getenv("AGENT_DURABLE_ROOT", "data/workspaces")
     oss_access_key_id: str = os.getenv("OSS_ACCESS_KEY_ID", "")
     oss_access_key_secret: str = os.getenv("OSS_ACCESS_KEY_SECRET", "")
     oss_bucket: str = os.getenv("OSS_BUCKET", "")
     oss_endpoint: str = os.getenv("OSS_ENDPOINT", "")
-    oss_prefix: str = os.getenv("OSS_PREFIX", "tenants/")
-    opik_api_key: str = os.getenv("OPIK_API_KEY", "").strip() or os.getenv("Opik_key", "").strip()
-    opik_workspace: str = os.getenv("OPIK_WORKSPACE", "").strip() or "jasonhuang115"
-    opik_project_name: str = os.getenv("OPIK_PROJECT_NAME", "").strip() or "deep-research"
-    opik_url_override: str = os.getenv("OPIK_URL_OVERRIDE", "").strip()
+    oss_prefix: str = os.getenv("OSS_PREFIX", "users/")
 
 
 def resolve_upload_dir(raw: str | None = None) -> Path:
@@ -58,17 +48,6 @@ def resolve_upload_dir(raw: str | None = None) -> Path:
     cwd = Path.cwd()
     if value == "data/uploads" and (cwd / "pyproject.toml").exists():
         return (cwd.parent / "data" / "uploads").resolve()
-    return (cwd / path).resolve()
-
-
-def resolve_durable_root(raw: str | None = None) -> Path:
-    value = (raw if raw is not None else settings.durable_root) or "data/workspaces"
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    cwd = Path.cwd()
-    if value == "data/workspaces" and (cwd / "pyproject.toml").exists():
-        return (cwd.parent / "data" / "workspaces").resolve()
     return (cwd / path).resolve()
 
 

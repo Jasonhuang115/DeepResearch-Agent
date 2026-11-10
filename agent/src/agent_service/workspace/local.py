@@ -50,9 +50,8 @@ class LocalProvider:
     base: Path
     notice: str | None = field(default=None)
 
-    async def ensure(self, conversation_id: str, tenant_id: str | None = None) -> LocalDirWorkspace:
+    async def ensure(self, conversation_id: str) -> LocalDirWorkspace:
         cid = safe_conversation_id(conversation_id)
-        _ = tenant_id
         root = self.base / cid
         await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
         return LocalDirWorkspace(root=root.resolve(), notice=self.notice)
