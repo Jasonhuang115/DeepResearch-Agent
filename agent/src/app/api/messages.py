@@ -89,12 +89,13 @@ async def create_message(
     content: Annotated[str, Form()] = "",
     files: Annotated[list[UploadFile] | None, File()] = None,
 ) -> dict:
+    user_id = user.id
     body = content.strip()
     uploads = await read_uploads(files or [])
     if not body and not uploads:
         raise AppError(422, "empty_message", "A message or attachment is required.")
 
-    conversation = await get_owned_conversation(session, user.id, conversation_id)
+    conversation = await get_owned_conversation(session, user_id, conversation_id)
     existing = await _existing_run(session, conversation.id, idempotency_key)
     if existing:
         return {"data": await _accepted_for_run(session, existing)}
@@ -105,14 +106,14 @@ async def create_message(
     stored_keys: list[str] = []
     try:
         for attachment_id, upload in zip(attachment_ids, uploads, strict=True):
-            key = attachment_key(user.id, conversation.id, attachment_id)
+            key = attachment_key(user_id, conversation.id, attachment_id)
             await objects.put(key, upload.data)
             stored_keys.append(key)
 
         await session.rollback()
         async with session.begin():
             conversation = await get_owned_conversation(
-                session, user.id, conversation_id, lock=True
+                session, user_id, conversation_id, lock=True
             )
             existing = await _existing_run(session, conversation.id, idempotency_key)
             if existing:
