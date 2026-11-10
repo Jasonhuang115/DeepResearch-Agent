@@ -4,28 +4,34 @@ version = "0.1.0"
 description = "Deep research agent service"
 requires-python = ">=3.12"
 dependencies = [
-  "aiokafka>=0.12",
+  "alembic>=1.14",
+  "argon2-cffi>=23.1",
+  "asyncmy>=0.2.10",
+  "e2b>=1.0",
+  "email-validator>=2.2",
   "fastapi>=0.115",
   "httpx>=0.28",
   "openai>=1.60",
-  "opik>=2.2.73",
+  "oss2>=2.18",
   "pypdf>=5.0",
+  "PyJWT>=2.10",
   "python-docx>=1.1",
+  "python-multipart>=0.0.20",
+  "redis>=5",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "ulid-py>=1.1",
   "uvicorn[standard]>=0.32",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24"]
-e2b = ["e2b>=1.0"]
-redis = ["redis>=5"]
-oss = ["oss2>=2.18"]
+dev = ["aiosqlite>=0.20", "pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_service", "src/research_engine"]
+packages = ["src/app", "src/agent_service", "src/research_engine"]
 
 [tool.uv]
 package = true
@@ -35,3 +41,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I", "UP", "SIM", "W"]

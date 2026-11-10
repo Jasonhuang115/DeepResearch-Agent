@@ -1,0 +1,88 @@
+services:
+  mysql:
+    image: mysql:8.4
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci --max-allowed-packet=64M
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-research}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-research}
+      MYSQL_USER: ${MYSQL_USER:-research}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-research}
+      TZ: UTC
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    env_file: ../.env
+    environment:
+      DATABASE_URL: mysql+asyncmy://${MYSQL_USER:-research}:${MYSQL_PASSWORD:-research}@mysql:3306/${MYSQL_DATABASE:-research}?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      OBJECT_ROOT: /data/objects
+      COOKIE_SECURE: "false"
+      CORS_ORIGINS: http://localhost:5173,http://localhost:8080
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main_api:app --host 0.0.0.0 --port 8000"]
+    volumes:
+      - object_data:/data/objects
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    env_file: ../.env
+    environment:
+      DATABASE_URL: mysql+asyncmy://${MYSQL_USER:-research}:${MYSQL_PASSWORD:-research}@mysql:3306/${MYSQL_DATABASE:-research}?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      OBJECT_ROOT: /data/objects
+      SANDBOX_MODE: ${SANDBOX_MODE:-local}
+    command: ["python", "-m", "app.main_worker"]
+    volumes:
+      - object_data:/data/objects
+      - workspace_data:/data/workspaces
+    depends_on:
+      api:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  object_data:
+  workspace_data:

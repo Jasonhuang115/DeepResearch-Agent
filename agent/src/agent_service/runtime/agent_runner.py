@@ -1,23 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
 from agent_service.config import settings
 from agent_service.context import ContextPacker, pack_messages
 from agent_service.observability.tracing import build_tracer
-from agent_service.durable import bind_workspace, build_durable_store
 from agent_service.runtime.system_prompt import build_system_prompt, detect_reply_language
 from agent_service.sources.ingest import ingest_attachments
 from agent_service.sources.ledger import SourceLedger
 from agent_service.subagents.supervisor import SPAWN_DESCRIPTION, SPAWN_PARAMETERS, Supervisor
-from agent_service.subagents.wake import wake_reports_block, wake_user_cue
 from agent_service.tools import ToolRegistry, default_registry
 from agent_service.tools.overflow import Overflow
 from agent_service.tools.web_search import Searcher
 from agent_service.workspace import WorkspaceProvider, default_provider
-from agent_service.workspace.e2b import LOST_NOTICE
 from research_engine.llm.openai_compat import OpenAICompatLLM
 from research_engine.loop import run_loop
 from research_engine.types import EventEmitter, LLMClient
@@ -71,7 +69,6 @@ async def run_research(
     workspace_provider: WorkspaceProvider | None = None,
     searcher: Searcher | None = None,
     fetcher: Any | None = None,
-    durable_store: Any | None = None,
     supervisor: Supervisor | None = None,
     tracer: Any | None = None,
 ) -> None:
@@ -84,7 +81,6 @@ async def run_research(
         metadata={
             "run_id": str(cmd.get("run_id") or ""),
             "conversation_id": conversation_id,
-            "tenant_id": str(cmd.get("tenant_id") or ""),
         },
     ) as run_span:
         try:
@@ -98,7 +94,6 @@ async def run_research(
                 workspace_provider=workspace_provider,
                 searcher=searcher,
                 fetcher=fetcher,
-                durable_store=durable_store,
                 supervisor=supervisor,
                 tracer=active,
                 run_span=run_span,
@@ -118,7 +113,6 @@ async def _execute(
     workspace_provider: WorkspaceProvider | None = None,
     searcher: Searcher | None = None,
     fetcher: Any | None = None,
-    durable_store: Any | None = None,
     supervisor: Supervisor | None = None,
     tracer: Any,
     run_span: Any | None = None,
@@ -132,10 +126,6 @@ async def _execute(
         reply_language=reply_language,
         extra={"web_search_provider": settings.web_search_provider},
     )
-    reports = wake_reports_block(cmd.get("wake"))
-    if reports:
-        system = f"{system.rstrip()}\n\n<subagent-reports>\n{reports}\n</subagent-reports>\n"
-
     if llm is None:
         if not settings.openai_api_key:
             if run_span is not None:
@@ -163,14 +153,6 @@ async def _execute(
         sandbox_store = getattr(provider, "store", None)
         if workspace.notice:
             system = f"{system.rstrip()}\n\n<workspace>\n{workspace.notice}\n</workspace>\n"
-        store = durable_store if durable_store is not None else build_durable_store()
-        workspace = await bind_workspace(
-            workspace,
-            tenant_id=str(cmd.get("tenant_id") or ""),
-            conversation_id=str(cmd.get("conversation_id") or ""),
-            store=store,
-            force_hydrate=_needs_hydrate(workspace.notice),
-        )
         ledger = SourceLedger(workspace, seq=seq)
         overflow = Overflow(
             workspace,
@@ -188,14 +170,6 @@ async def _execute(
         provider = workspace_provider
         workspace = await _ensure_workspace(provider, cmd)
         sandbox_store = getattr(provider, "store", None)
-        store = durable_store if durable_store is not None else build_durable_store()
-        workspace = await bind_workspace(
-            workspace,
-            tenant_id=str(cmd.get("tenant_id") or ""),
-            conversation_id=str(cmd.get("conversation_id") or ""),
-            store=store,
-            force_hydrate=_needs_hydrate(workspace.notice),
-        )
         ledger = SourceLedger(workspace, seq=seq)
         if registry.overflow is None:
             registry.overflow = Overflow(
@@ -207,7 +181,6 @@ async def _execute(
     if supervisor is not None and workspace is not None and registry is not None:
         supervisor.note_session(
             conversation_id=str(cmd.get("conversation_id") or ""),
-            tenant_id=str(cmd.get("tenant_id") or ""),
             user_id=str(cmd.get("user_id") or ""),
             workspace=workspace,
             ledger=ledger,
@@ -246,7 +219,6 @@ async def _execute(
         cmd,
         system,
         manifest=manifest,
-        wake_cue=wake_user_cue(reply_language) if reports else "",
     )
     keep_stop = asyncio.Event()
     keep_task = _start_keepalive(
@@ -272,24 +244,13 @@ async def _execute(
         keep_stop.set()
         if keep_task is not None:
             keep_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await keep_task
-            except (asyncio.CancelledError, Exception):
-                pass
 
 
 async def _ensure_workspace(provider: WorkspaceProvider, cmd: dict) -> Any:
     cid = str(cmd.get("conversation_id") or "")
-    tenant_id = str(cmd.get("tenant_id") or "")
-    try:
-        return await provider.ensure(cid, tenant_id=tenant_id)  # type: ignore[call-arg]
-    except TypeError:
-        return await provider.ensure(cid)
-
-
-def _needs_hydrate(notice: str | None) -> bool:
-    text = notice or ""
-    return LOST_NOTICE in text
+    return await provider.ensure(cid)
 
 
 def _start_keepalive(
@@ -343,7 +304,6 @@ def _chat_messages(
     system: str,
     *,
     manifest: str = "",
-    wake_cue: str = "",
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = [{"role": "system", "content": system}]
     for item in pack_messages(cmd.get("messages") or []):
@@ -364,6 +324,4 @@ def _chat_messages(
             last["content"] = user_body
         elif last is None or last.get("role") != "user" or last.get("content") != user_body:
             out.append({"role": "user", "content": user_body})
-    if wake_cue:
-        out.append({"role": "user", "content": wake_cue})
     return out

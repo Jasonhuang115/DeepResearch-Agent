@@ -19,7 +19,7 @@ def load_repo_env(path: Path | None = None) -> None:
 def default_env_path() -> Path | None:
     start = Path(__file__).resolve()
     for parent in start.parents:
-        if (parent / "agent" / "pyproject.toml").is_file() and (parent / "backend").is_dir():
+        if (parent / "agent" / "pyproject.toml").is_file():
             return parent / ".env"
     cwd = Path.cwd()
     if (cwd / "agent" / "pyproject.toml").is_file():

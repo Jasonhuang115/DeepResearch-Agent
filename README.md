@@ -1,49 +1,69 @@
 # Deep Research Agent
 
-Three processes:
+Python/FastAPI deep-research service with a MySQL-backed worker queue and resumable SSE output.
 
-- **Go** (`backend/`) — auth, tenant isolation, conversations, SSE, Kafka fan-out
-- **Python** (`agent/`) — OpenAI-compatible Chat Completions loop (`research_engine`) plus this product's prompts and tools (`agent_service`)
-- **TypeScript** (`frontend/`) — conversation UI
+## Architecture
 
-## Prerequisites
+- `agent/src/app/main_api.py`: HTTP API, authentication, uploads, SSE.
+- `agent/src/app/main_worker.py`: recoverable background research worker.
+- MySQL: users, conversations, runs, messages, attachments, run events.
+- Redis: refresh tokens, sandbox bindings, live event and cancel notifications.
+- Aliyun OSS: attachments, sources, notes, reports, checkpoints.
+- E2B: production research sandbox, one sandbox per conversation.
+- `frontend/`: React and TypeScript UI.
 
-Go 1.23+, Docker (Colima is fine), Node 20+, uv.
+The Go backend, tenant records and WebSockets are not used.
+
+## Local development without a full Docker stack
+
+Start MySQL and Redis:
 
 ```bash
-colima start   # if using Colima
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/compose.infra.yml up -d
 ```
 
-## Run
+Create the environment file and database schema:
 
 ```bash
-# terminal 1
-cd backend && go run ./cmd/server
+cp .env.example .env
+cd agent
+uv sync --extra dev
+uv run alembic upgrade head
+```
 
-# terminal 2
-cd agent && uv sync
-export OPENAI_API_KEY=sk-...          # required for live Q&A
-# export OPENAI_MODEL=gpt-4.1-mini    # optional
-# export OPENAI_BASE_URL=...          # optional compatible proxy
-# export AGENT_MAX_TURNS=8            # optional
-PYTHONPATH=src uv run python -m agent_service
+Run each process in a separate terminal:
 
-# terminal 3
+```bash
+cd agent && uv run uvicorn app.main_api:app --reload --port 8000
+cd agent && uv run python -m app.main_worker
 cd frontend && npm install && npm run dev
 ```
 
-Open http://localhost:5173 — register, then ask a question. The model answers in the conversation; follow-ups reuse history from Go.
+Open <http://localhost:5173>.
 
-This round: `web_search` is mock (not real web). `Read` / `Write` / `Bash` are registered but not implemented (they return an error; the loop continues).
+Local development uses `OBJECT_STORE=local` and `SANDBOX_MODE=local`. Production must use
+`OBJECT_STORE=oss` and `SANDBOX_MODE=e2b`.
 
-Agent tests: `cd agent && uv sync --extra dev && uv run pytest`.
+## Full Docker development environment
 
-Kafka UI: http://localhost:8088
+```bash
+cp .env.example .env
+docker compose -f deploy/compose.dev.yml up --build
+```
 
-## Layout
+Open <http://localhost:8080>.
 
-- `agent/src/research_engine/` — tool-calling loop, FinishKind, OpenAI client
-- `agent/src/agent_service/` — Kafka consumer, prompt fragments, tool registry, runner
+Docker Desktop is not required. Docker Engine, Colima or OrbStack can run the same Compose files.
 
-See `docs/contracts/` for HTTP, Kafka, and event types.
+## Verification
+
+```bash
+cd agent
+source .venv/bin/activate
+ruff check src/app alembic tests/test_app_core.py
+pytest -q
+
+cd ../frontend
+npm run build
+npm run lint
+```

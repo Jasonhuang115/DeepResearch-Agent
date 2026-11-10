@@ -9,15 +9,15 @@ import {
 } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { getAccess } from './api/client'
+import { getAccess, refreshSession } from './api/client'
 import './index.css'
 import { LoginPage } from './pages/Login'
 import { WorkspacePage } from './pages/Workspace'
 
 const qc = new QueryClient()
 
-function requireAuth() {
-  if (!getAccess()) throw redirect({ to: '/login' })
+async function requireAuth() {
+  if (!getAccess() && !(await refreshSession())) throw redirect({ to: '/login' })
 }
 
 const rootRoute = createRootRoute({

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shlex
@@ -13,14 +14,12 @@ from agent_service.workspace.protocol import (
     SandboxIdStore,
     WorkspaceError,
 )
-from agent_service.workspace.local import LocalDirWorkspace, LocalProvider
 from agent_service.workspace.store import MemorySandboxIdStore
 
 log = logging.getLogger("agent_service.workspace.e2b")
 
 E2B_HOME = "/home/user"
 LOST_NOTICE = "Previous workspace could not be reconnected; this is a new empty workspace."
-FALLBACK_NOTICE = "Isolated sandbox unavailable; using the local workspace."
 
 
 @dataclass
@@ -68,22 +67,12 @@ class E2BWorkspace:
 class E2BProvider:
     factory: E2BFactory
     store: SandboxIdStore = field(default_factory=MemorySandboxIdStore)
-    local: LocalProvider | None = None
     timeout_sec: int = 3600
     ttl_sec: int = 3300
     home: str = E2B_HOME
 
-    async def ensure(self, conversation_id: str, tenant_id: str | None = None) -> E2BWorkspace | LocalDirWorkspace:
-        try:
-            return await self._ensure_e2b(conversation_id)
-        except Exception:
-            log.exception("E2B ensure failed; falling back to local workspace")
-            if self.local is None:
-                raise
-            ws = await self.local.ensure(conversation_id, tenant_id=tenant_id)  # type: ignore[union-attr]
-            extra = FALLBACK_NOTICE
-            ws.notice = f"{ws.notice}\n{extra}".strip() if ws.notice else extra
-            return ws
+    async def ensure(self, conversation_id: str) -> E2BWorkspace:
+        return await self._ensure_e2b(conversation_id)
 
     async def _ensure_e2b(self, conversation_id: str) -> E2BWorkspace:
         notice: str | None = None
@@ -99,7 +88,12 @@ class E2BProvider:
                 notice = LOST_NOTICE
         client = await self.factory.create(self.timeout_sec)
         await self.store.set(conversation_id, client.sandbox_id, self.ttl_sec)
-        return E2BWorkspace(client=client, home=self.home, notice=notice, timeout_sec=self.timeout_sec)
+        return E2BWorkspace(
+            client=client,
+            home=self.home,
+            notice=notice,
+            timeout_sec=self.timeout_sec,
+        )
 
 
 class SDKSandbox:
@@ -108,7 +102,7 @@ class SDKSandbox:
 
     @property
     def sandbox_id(self) -> str:
-        return str(getattr(self._raw, "sandbox_id", None) or getattr(self._raw, "id"))
+        return str(getattr(self._raw, "sandbox_id", None) or self._raw.id)  # type: ignore[attr-defined]
 
     async def read(self, abs_path: str) -> str:
         data = await self._raw.files.read(abs_path)  # type: ignore[attr-defined]
@@ -121,10 +115,8 @@ class SDKSandbox:
         if parent and parent not in {"/", self._home()}:
             mkdir = getattr(getattr(self._raw, "files", None), "make_dir", None)
             if mkdir is not None:
-                try:
+                with contextlib.suppress(Exception):
                     await mkdir(parent)
-                except Exception:
-                    pass
         await self._raw.files.write(abs_path, content)  # type: ignore[attr-defined]
 
     def _home(self) -> str:

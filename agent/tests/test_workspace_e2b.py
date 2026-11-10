@@ -3,17 +3,16 @@ from pathlib import Path
 import pytest
 
 from agent_service.config import settings
+from agent_service.tools.fs import read_file, write_file
 from agent_service.workspace.e2b import (
+    LOST_NOTICE,
     E2BProvider,
     E2BWorkspace,
     FakeE2BFactory,
-    LOST_NOTICE,
-    FALLBACK_NOTICE,
 )
 from agent_service.workspace.local import LocalProvider
 from agent_service.workspace.provider import build_provider
 from agent_service.workspace.store import MemorySandboxIdStore, RedisSandboxIdStore
-from agent_service.tools.fs import read_file, write_file
 
 
 class FakeRedis:
@@ -62,22 +61,18 @@ async def test_e2b_provider_reuses_then_rebuilds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_e2b_create_falls_back_to_local(tmp_path: Path) -> None:
+async def test_e2b_create_failure_does_not_fall_back_to_local() -> None:
     factory = FakeE2BFactory()
     factory.fail_create = True
-    provider = E2BProvider(
-        factory=factory,
-        store=MemorySandboxIdStore(),
-        local=LocalProvider(tmp_path),
-    )
-    ws = await provider.ensure("conv_b")
-    assert FALLBACK_NOTICE in (ws.notice or "")
-    await ws.write_text("ok.md", "local")
-    assert (tmp_path / "conv_b" / "ok.md").read_text(encoding="utf-8") == "local"
+    provider = E2BProvider(factory=factory, store=MemorySandboxIdStore())
+    with pytest.raises(RuntimeError):
+        await provider.ensure("conv_b")
 
 
 @pytest.mark.asyncio
-async def test_build_provider_auto_local_without_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_build_provider_auto_local_without_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(settings, "workspace_root", str(tmp_path))
     monkeypatch.setattr(settings, "e2b_api_key", "")
     provider = build_provider(mode="auto")
@@ -99,9 +94,9 @@ async def test_build_provider_auto_e2b_with_factory(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_provider_e2b_without_key_uses_local(tmp_path: Path) -> None:
-    provider = build_provider(mode="e2b", e2b_api_key="", workspace_root=str(tmp_path))
-    assert isinstance(provider, LocalProvider)
+async def test_build_provider_e2b_without_key_fails(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="E2B_API_KEY"):
+        build_provider(mode="e2b", e2b_api_key="", workspace_root=str(tmp_path))
 
 
 @pytest.mark.asyncio

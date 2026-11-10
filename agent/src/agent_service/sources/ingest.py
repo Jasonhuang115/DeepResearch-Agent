@@ -13,7 +13,9 @@ from agent_service.workspace.protocol import Workspace
 _UNSAFE = re.compile(r"[^\w.\-]+", re.UNICODE)
 
 
-async def ingest_attachments(cmd: dict[str, Any], workspace: Workspace, ledger: SourceLedger) -> str:
+async def ingest_attachments(
+    cmd: dict[str, Any], workspace: Workspace, ledger: SourceLedger
+) -> str:
     refs = ((cmd.get("request") or {}).get("attachments")) or []
     if not isinstance(refs, list) or not refs:
         return ""
@@ -29,7 +31,12 @@ async def ingest_attachments(cmd: dict[str, Any], workspace: Workspace, ledger: 
         safe = _unique_name(filename, used)
         rel = f"{ATTACHMENT_DIR}/{safe}"
         try:
-            data = _read_upload_bytes(str(raw.get("path") or ""))
+            embedded = raw.get("data")
+            data = (
+                bytes(embedded)
+                if isinstance(embedded, (bytes, bytearray))
+                else _read_upload_bytes(str(raw.get("path") or ""))
+            )
             await workspace.write_bytes(rel, data)
         except Exception as exc:  # noqa: BLE001
             record = await ledger.add(
